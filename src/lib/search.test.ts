@@ -20,6 +20,7 @@ describe('spinSearch', () => {
       rwy: 2000,
       paved: true,
       iap: false,
+      food: false,
     })
   })
 

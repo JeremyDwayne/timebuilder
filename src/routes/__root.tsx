@@ -77,7 +77,30 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
         <footer className="mx-auto max-w-5xl px-4 py-10 text-center font-mono text-xs text-muted">
           <p>
             Planning aid only. Check current charts, NOTAMs and the Chart Supplement before you
-            fly.
+            fly. Airport restaurants keep their own hours and close for good without telling
+            anyone, so ring ahead before you plan a trip around one.
+          </p>
+          {/* Both place datasets ask to be credited, and the licences require it. */}
+          <p className="mt-1.5">
+            Airports and airspace from the FAA. On-field food from{' '}
+            <a
+              href="https://overturemaps.org"
+              target="_blank"
+              rel="noreferrer"
+              className="text-sky underline underline-offset-4"
+            >
+              Overture Maps
+            </a>{' '}
+            and{' '}
+            <a
+              href="https://www.openstreetmap.org/copyright"
+              target="_blank"
+              rel="noreferrer"
+              className="text-sky underline underline-offset-4"
+            >
+              OpenStreetMap
+            </a>
+            .
           </p>
           <p className="mt-1.5 flex flex-wrap items-baseline justify-center gap-x-2">
             {/* Server and browser can straddle midnight on New Year's Eve. */}

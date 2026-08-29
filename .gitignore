@@ -8,3 +8,4 @@ src/routeTree.gen.ts
 *.local
 .DS_Store
 .cache
+.scratch

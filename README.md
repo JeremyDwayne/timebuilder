@@ -27,6 +27,7 @@ server at first use.
 | `frequencies` | 7,155 | CTAF, tower, ground, clearance, UNICOM, ATIS, AWOS, ASOS |
 | `state-rings` / `state-labels` | 103 / 52 | State outlines for the map |
 | `airspace` | 2,826 | Class B, C and D surface areas plus MOAs and restricted, prohibited, warning and alert areas |
+| `restaurants` | 3,811 | Places to eat on the field itself |
 
 - Public-use status, position, elevation and instrument-approach flags come from
   the FAA Aeronautical Information Services airport layer, the authoritative
@@ -35,15 +36,32 @@ server at first use.
   data and 72% have at least one frequency; pages degrade to "unknown" for the rest.
 - State outlines come from a pre-simplified public GeoJSON, delta-encoded to
   hundredths of a degree, which is about half a nautical mile.
+- Restaurants come from two sources that each supply what the other cannot.
+  Overture Maps has the coverage: it carries the small-town businesses nobody has
+  ever put into OpenStreetMap, which is most of general aviation. What it has no
+  concept of is an airport, so a radius around the ARP at a field beside a town
+  returns the town. OpenStreetMap supplies the fence, since `aeroway=aerodrome`
+  is well mapped even where the businesses inside it are not, and its own
+  eateries are folded in for the opening hours Overture does not carry. Nothing
+  depends on either source carrying the right airport identifier, which they
+  often do not.
 - Airspace comes from the FAA Class Airspace and Special Use Airspace layers.
   Their 4.7 million raw vertices are reduced to 53,000 by Douglas-Peucker with a
   tolerance that scales with the size of each area, so a four-mile Class D circle
   stays round while a restricted area spanning a degree does not cost a thousand
   points.
 
+Regenerating needs `@duckdb/node-api`, which is a dev dependency purely to read
+Overture's Parquet off S3. It pulls a 112 MB native binding and nothing else in
+the project touches it, so if that weight is unwelcome on a deploy it is safe to
+drop from `package.json` and install on demand: the generated table is committed,
+and the import is lazy enough that a cached Overture pull never loads it.
+
 Regenerate with `pnpm data:build` after an FAA 56-day cycle. The airspace layers
 meter by returned vertex rather than by request, so that part is paced and takes
-several minutes; raw pulls are kept in `.cache/` and reused on a re-run.
+several minutes; Overpass is asked one tile at a time and takes longer again. Raw
+pulls for both are kept in `.cache/` and reused on a re-run, so a second pass
+costs nothing and a failed run resumes where it stopped.
 
 ## How the pieces fit
 
@@ -62,7 +80,7 @@ several minutes; raw pulls are kept in `.cache/` and reused on a re-run.
 
 The URL stays the source of truth for any one spin. Alongside it,
 `src/lib/preferences.ts` keeps the pilot's own setup in `localStorage`: departure
-field, time band, cruise speed, runway minimum and the two filters. A departure
+field, time band, cruise speed, runway minimum and the three filters. A departure
 airport and a cruise speed describe the aeroplane and the home field rather than
 the trip, so they should not have to be re-entered every visit.
 
@@ -242,6 +260,85 @@ cross the plot with both endpoints outside it, and a large area can enclose the
 departure airport while every vertex sits beyond the radius. Both containment and
 edge distance are checked.
 
+## Food on the field
+
+This is a tool for general aviation, so "food" means somewhere a pilot who has
+just shut down on the ramp can walk to. Three things are excluded and the
+exclusion is what makes the filter worth having.
+
+Anything carrying an OSM `brand`, which is a chain and
+not what anyone flies somewhere for. Anything inside an `aeroway=terminal`
+polygon, which is past security. And everything at a field the airlines serve.
+
+That third one was not in the original plan and it turned out to matter most. The
+terminal test alone looked convincing on a single state, but nationally the big
+terminals are either not mapped as polygons or do not enclose their own
+restaurants: Newark alone contributed forty-three entries that no pilot can walk
+to. So a field is set aside entirely when OurAirports calls it a
+`large_airport`, or calls it a `medium_airport` and records scheduled airline
+service. A small field keeps its cafe either way, including the Alaskan ones with
+a scheduled flight and a shack for a terminal.
+
+Of 4,718 public-use fields, 608 have anything mapped at all and 272 have
+something a pilot on the ramp can walk to. The 365 entries that survive are the
+Airport in the Sky on Catalina, the Parachute Inn, Bistro Le Relais, Three-Zero,
+Flabob, Sebring's Runway Cafe and their like, rather than a Cinnabon at Newark. A
+false positive costs a wasted flight; a false negative only costs a field that is
+still listed on its own page.
+
+3,184 of the 4,718 fields have a mapped boundary. The rest fall back to
+`FOOD_UNFENCED_NM`, which is deliberately tight: at Bartow the two on-field
+places are 0.20 and 0.23 nm out, while at half a mile Avon Park starts collecting
+the high street.
+
+What is left is a coverage gap in the sources rather than anything the build can
+fix. Kissimmee, Avon Park and Arcadia have a restaurant on the field and neither
+Overture nor OpenStreetMap knows about it. Treat an empty result as "nobody has
+recorded it" rather than "there is nothing there".
+
+### Places that have closed
+
+Neither dataset is told when a restaurant shuts, so both go on listing it. This
+is the failure that actually costs a pilot something, and it is worth
+understanding how it is caught.
+
+Overture has an `operating_status`, and it is not enough on its own: Winter
+Haven's Pappy's Grill has been closed for years and Overture says `open`. What
+gives it away is underneath. It is carried by two records, one from a business
+registry with a source confidence of 0.55 and a website belonging to an entirely
+different business, and one nobody has touched since 2015. The cafe on the same
+field is carried by a provider that looked at it this month.
+
+Overture stamps its own pipeline datasets onto every row, which is what floats
+the blended `confidence` on a dead record, so the providers underneath are judged
+separately: at least one of them has to have been confident and to have looked
+inside `FOOD_MAX_AGE_YEARS`. That drops both Pappy's records and keeps every
+genuine field cafe tested against it.
+
+The month of that last sighting is kept in the table and printed beside the
+place, in the popup and on the field page, because no filter makes this safe and
+the honest thing is to say how old the answer is.
+
+`fieldFoodCounts` in `airport-db.server.ts` is the only place that decides which
+fields qualify. The `food` search param, the `fieldFood` flag the map draws its
+burger from, and the count on the candidate list all read it, so the wheel can
+never draw a field the map left unmarked. The map's flag is computed on the
+server rather than re-derived in the browser for exactly that reason. Nothing is
+thrown away: excluded entries are still listed on the field page and counted in
+the popup, they just do not make a field a destination.
+
+The map draws the burger above the dot rather than in place of it, so the dot
+still marks the position, and the burger takes the dot's own colour, so range
+stays a matter of brightness while food stays a matter of shape. `FoodMark`
+holds the glyph once, as SVG for the list and the field page and as a canvas path
+for the plot, so the two cannot drift apart.
+
+Clicking a field now opens the popup instead of setting `?pick=` outright. The
+old behaviour put the answer in a line under the map, a long way from the thing
+that was clicked, and left nowhere to say what is on the field. One popup answers
+every click: the field with its leg and its food, then the airspace and TFR
+layers underneath it, smallest first.
+
 ## Tests
 
 `pnpm test` runs vitest. Nothing reaches the network: the two modules that make
@@ -272,9 +369,10 @@ Data and server:
 
 - `src/data` every generated row against its declared field count, so a data
   refresh that smuggled a `|` into a name would fail rather than shift every
-  field after it.
+  field after it, plus that on-field eateries sort ahead of terminal ones.
 - `src/server/airport-db` the in-range invariant: the capped candidate list, the
-  identifier set and a `?pick=` lookup all agree with the full match set.
+  identifier set and a `?pick=` lookup all agree with the full match set, and
+  that the food filter and the food count are the same rule.
 - `src/server/geography` and `src/server/airspace` that the delta-encoded rings
   decode back onto the United States, and that the cheap bounding-box filter
   never drops an area that genuinely reaches the radius.
@@ -310,6 +408,11 @@ that applies. Runway numbers are always shown as painted.
 
 State outlines cover the 50 states and DC. Puerto Rico and the other territories
 have airports in the dataset but no outline on the map.
+
+Restaurants are contributed to OpenStreetMap by whoever felt like it, so the data
+is uneven and can be years old. A field cafe keeps its own hours, closes for the
+season and goes out of business, and the hours in the table are whatever someone
+last wrote down. Treat a hit as a reason to phone ahead, not as a booking.
 
 Airspace is lateral limits only, from the published cycle. It is not a substitute
 for a current sectional, and it says nothing about whether a MOA or restricted

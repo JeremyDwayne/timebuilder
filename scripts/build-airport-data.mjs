@@ -5,8 +5,14 @@
  *  - FAA Aeronautical Information Services "US Airport" feature layer, the only
  *    source of the two that carries an authoritative public/private-use flag.
  *  - OurAirports runways.csv and airport-frequencies.csv, for the runway
- *    environment and radio frequencies.
+ *    environment and radio frequencies, and airports.csv for which fields the
+ *    airlines serve.
  *  - A pre-simplified US state boundary GeoJSON, for the map outline.
+ *  - Overture Maps, for what there is to eat on the field, read straight off S3
+ *    with DuckDB. That is the only reason `@duckdb/node-api` is a dependency,
+ *    and it is only loaded when the Overture pull is not already cached.
+ *  - OpenStreetMap through Overpass, for the airfield boundaries that decide
+ *    which of those places count as being on the field, and for opening hours.
  *
  * Run with: pnpm data:build
  */
@@ -21,6 +27,7 @@ const DATA_DIR = resolve(ROOT, 'src/data')
 const CACHE_DIR = resolve(ROOT, '.cache')
 const ARCGIS = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services'
 const FAA_LAYER = `${ARCGIS}/US_Airport/FeatureServer/0/query`
+const AIRPORTS_CSV = 'https://davidmegginson.github.io/ourairports-data/airports.csv'
 const RUNWAYS_CSV = 'https://davidmegginson.github.io/ourairports-data/runways.csv'
 const FREQUENCIES_CSV =
   'https://davidmegginson.github.io/ourairports-data/airport-frequencies.csv'
@@ -491,3 +498,555 @@ for (const feature of [...classAreas, ...suaAreas]) {
 
 console.log(`airspace: ${rawVertices} vertices simplified to ${keptVertices}`)
 writeTable('airspace', 'kind|label|floorFt|ceilingFt|minLon,minLat,maxLon,maxLat|points', airspaceRows)
+
+// ------------------------------------------------------------- restaurants
+
+/**
+ * Places to eat on the field, from two sources that each supply what the other
+ * cannot.
+ *
+ * Overture Maps has the coverage. It carries the small-town businesses that
+ * OpenStreetMap has never had anyone map, which is most of general aviation:
+ * Winter Haven, Okeechobee, Bartow and LaBelle all have a cafe on the field and
+ * none of them are in OSM at all. What Overture has no concept of is an airport,
+ * so a radius around the ARP at a field beside a town returns the whole town.
+ *
+ * OpenStreetMap supplies the fence. `aeroway=aerodrome` is well mapped even
+ * where the businesses inside it are not, so the boundary decides what counts as
+ * on the field and Overture decides what is there. OSM's own eateries are folded
+ * in as well, because they carry opening hours and Overture does not.
+ *
+ * Fetched in its own query rather than alongside anything else: Overpass returns
+ * a multipolygon relation without member geometry when the same query also asks
+ * for areas, and 384 aerodromes are mapped as relations, Sebring among them.
+ */
+const OVERPASS = 'https://overpass-api.de/api/interpreter'
+const OVERTURE_RELEASE = '2026-08-19.0'
+const OVERTURE_PLACES = `s3://overturemaps-us-west-2/release/${OVERTURE_RELEASE}/theme=places/type=place/*`
+/** Tile side in degrees. Small enough that no single Overpass query is a heavy one. */
+const FOOD_TILE_DEG = 4
+const FOOD_PACE_MS = 2_000
+/**
+ * How far from the published ARP a place can sit and still belong to that field
+ * once it is inside the fence. Airport restaurants cluster within half a mile;
+ * a large field can put its terminal a mile out.
+ */
+const FOOD_MAX_NM = 1.5
+/**
+ * And how far at a field OpenStreetMap has drawn no boundary for. Much tighter,
+ * because without a fence this is the only thing keeping the town out. Bartow's
+ * two are at 0.20 and 0.23; at half a mile Avon Park starts collecting the high
+ * street.
+ */
+const FOOD_UNFENCED_NM = 0.3
+/** Overture publishes entries it is barely sure of. Below this they are noise. */
+const FOOD_MIN_CONFIDENCE = 0.8
+/**
+ * And how sure the provider underneath it was. Overture blends its sources into
+ * one score that can read high on the strength of a stale record, so the
+ * providers are judged separately. Its own pipeline datasets are excluded
+ * because they are stamped onto every row and say nothing about the place.
+ */
+const FOOD_MIN_PROVIDER_CONFIDENCE = 0.75
+/**
+ * How old a provider's last look may be. This is the closed-down test, and it is
+ * the one that matters: a restaurant that shut years ago goes on being listed as
+ * open, because nothing tells the dataset otherwise. Winter Haven's Pappy's
+ * Grill is carried by a business registry that got the website wrong and by a
+ * record nobody has touched since 2015, while the cafe next to it on the same
+ * field was seen this month.
+ */
+const FOOD_MAX_AGE_YEARS = 3
+/** Grid cell for the Overture join, a little over 3 nm. */
+const FOOD_CELL_DEG = 0.05
+
+const builtAirports = airportRows.map((row) => {
+  const [id, icao, , , , lat, lon] = row.split('|')
+  // The common KXXX case is left out of the table and reconstructed here, the
+  // same way the server does when it decodes the row.
+  return { id, icao: icao || `K${id}`, lat: Number(lat), lon: Number(lon) }
+})
+
+/** Flat-earth nautical miles. Fine over the mile or two this is ever asked about. */
+function nauticalMiles(aLat, aLon, bLat, bLon) {
+  const y = (aLat - bLat) * 60
+  const x = (aLon - bLon) * 60 * Math.cos((aLat * Math.PI) / 180)
+  return Math.hypot(x, y)
+}
+
+/** Ray casting against an OSM geometry array of `{lat, lon}`. */
+function inRing(ring, lat, lon) {
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const yi = ring[i].lat
+    const xi = ring[i].lon
+    const yj = ring[j].lat
+    const xj = ring[j].lon
+    if (yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+
+const vertexKey = (point) => `${point.lat.toFixed(7)},${point.lon.toFixed(7)}`
+
+/**
+ * Joins multipolygon member ways into closed rings. A relation's outer members
+ * are fragments of the boundary in no particular order or direction, so each is
+ * appended to whichever end it meets until the ring closes.
+ */
+function stitchRings(fragments) {
+  const rings = []
+  const loose = fragments.map((fragment) => fragment.slice())
+  while (loose.length) {
+    let ring = loose.pop()
+    let joined = true
+    while (joined && vertexKey(ring[0]) !== vertexKey(ring[ring.length - 1])) {
+      joined = false
+      for (let i = 0; i < loose.length; i++) {
+        const fragment = loose[i]
+        const head = vertexKey(ring[0])
+        const tail = vertexKey(ring[ring.length - 1])
+        if (tail === vertexKey(fragment[0])) ring = ring.concat(fragment.slice(1))
+        else if (tail === vertexKey(fragment[fragment.length - 1]))
+          ring = ring.concat(fragment.slice().reverse().slice(1))
+        else if (head === vertexKey(fragment[fragment.length - 1]))
+          ring = fragment.slice(0, -1).concat(ring)
+        else if (head === vertexKey(fragment[0]))
+          ring = fragment.slice().reverse().slice(0, -1).concat(ring)
+        else continue
+        loose.splice(i, 1)
+        joined = true
+        break
+      }
+    }
+    if (ring.length > 3) rings.push(ring)
+  }
+  return rings
+}
+
+/** Closed outer rings of a way or a multipolygon relation. */
+function outerRings(element) {
+  if (element.type === 'way') {
+    return element.geometry && element.geometry.length > 3 ? [element.geometry] : []
+  }
+  return stitchRings(
+    (element.members ?? []).filter((m) => m.role !== 'inner' && m.geometry).map((m) => m.geometry),
+  )
+}
+
+/**
+ * Fields where food is behind a security checkpoint rather than off the ramp.
+ *
+ * The `aeroway=terminal` test alone is not enough. It held at the fields it was
+ * checked against, but nationally the big terminals are either not mapped as
+ * polygons or do not enclose their own restaurants, and Newark alone then
+ * contributed forty-odd entries that no pilot can walk to. A hub is excluded
+ * outright, and a regional field is excluded once it carries scheduled airline
+ * service. A small field keeps its cafe either way, including the Alaskan ones
+ * with a scheduled flight and a shack for a terminal.
+ */
+async function airlineFields() {
+  const csv = await fetchCsv(AIRPORTS_CSV)
+  const airline = new Set()
+  for (const row of csv.rows) {
+    const type = row[csv.col('type')]
+    const scheduled = row[csv.col('scheduled_service')] === 'yes'
+    if (type !== 'large_airport' && !(type === 'medium_airport' && scheduled)) continue
+    // ICAO only. The local code is not unique across the file, and folding it
+    // into the same set had heliports and private strips excluding real fields
+    // that happened to share a three-letter code.
+    const icao = row[csv.col('ident')]
+    if (icao) airline.add(icao)
+  }
+  return airline
+}
+
+/**
+ * Overture publishes a few hundred leaf categories. These fold the ones that
+ * mean "somewhere to eat" into our five kinds and drop the rest, which is most
+ * of them: `restaurant_wholesale` and `barber` are not lunch.
+ */
+const OVERTURE_REJECT = new Set([
+  'store', 'market', 'delivery', 'distribution', 'supply', 'supplies', 'wholesale',
+  'wholesaler', 'school', 'services', 'service', 'barber', 'bartender', 'bartending',
+  'equipment', 'clinic', 'dealer', 'rentals', 'repair', 'stop', 'station', 'gas',
+  'consultant', 'banks', 'tours', 'b2b', 'treatment', 'theater', 'theatre',
+  'publisher', 'public', 'recreation', 'contractor', 'remodeling', 'goods',
+  'manufacturer', 'frozen', 'imported',
+])
+/** Where the words read as something the place is not. */
+const OVERTURE_EXCEPTIONS = { salad_bar: 'restaurant', milk_bar: 'cafe', food_court: 'fast_food' }
+const OVERTURE_KINDS = [
+  ['pub', ['pub', 'gastropub', 'brewpub']],
+  ['cafe', ['cafe', 'coffee', 'bakery', 'tea', 'donuts', 'donut', 'cream', 'juice', 'smoothie', 'patisserie', 'creamery', 'bagels', 'bubble']],
+  ['fast_food', ['fast', 'truck', 'sandwich', 'takeaway', 'cafeteria']],
+  ['bar', ['bar', 'brewery', 'taproom', 'tavern', 'cocktail', 'saloon', 'winery', 'speakeasy']],
+  ['restaurant', ['restaurant', 'steakhouse', 'diner', 'buffet', 'delicatessen', 'eatery', 'eat', 'grill', 'bistro', 'pizzeria', 'soul', 'food']],
+]
+
+function overtureKind(category) {
+  if (!category) return undefined
+  if (category in OVERTURE_EXCEPTIONS) return OVERTURE_EXCEPTIONS[category]
+  // Whole words, not substrings: `barber` is not a bar and `barbecue` is not either.
+  const words = category.split('_')
+  if (words.some((word) => OVERTURE_REJECT.has(word))) return undefined
+  for (const [kind, match] of OVERTURE_KINDS) {
+    if (words.some((word) => match.includes(word))) return kind
+  }
+  return undefined
+}
+
+/**
+ * Every eatery Overture knows about within a few miles of one of our airports,
+ * that somebody has actually looked at recently.
+ *
+ * The whole US theme is tens of millions of rows, so the airports are handed to
+ * DuckDB as a grid of cells and the scan is an equi-join against them. Filtering
+ * by distance instead would be a cross product.
+ */
+async function overturePlaces() {
+  const cachePath = resolve(CACHE_DIR, 'overture-places.json')
+  if (existsSync(cachePath)) {
+    console.log('  reusing overture-places.json; delete it to re-download')
+    return JSON.parse(readFileSync(cachePath, 'utf8'))
+  }
+
+  const cells = new Set()
+  for (const airport of builtAirports) {
+    const gx = Math.floor(airport.lon / FOOD_CELL_DEG)
+    const gy = Math.floor(airport.lat / FOOD_CELL_DEG)
+    // The neighbours too, so a place just over a cell edge is still considered.
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) cells.add(`${gx + dx},${gy + dy}`)
+  }
+  const cellsPath = resolve(CACHE_DIR, 'overture-cells.csv')
+  await mkdir(CACHE_DIR, { recursive: true })
+  writeFileSync(cellsPath, `gx,gy\n${[...cells].join('\n')}\n`)
+
+  const { DuckDBInstance } = await import('@duckdb/node-api')
+  const connection = await (await DuckDBInstance.create()).connect()
+  await connection.run("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
+  await connection.run("SET s3_region='us-west-2';")
+
+  console.log('  scanning Overture places, this takes a few minutes')
+  const reader = await connection.runAndReadAll(`
+    WITH cells AS (SELECT gx, gy FROM read_csv('${cellsPath}', header = true))
+    SELECT p.names.primary AS name,
+           p.categories.primary AS category,
+           p.confidence AS confidence,
+           ST_Y(p.geometry) AS lat,
+           ST_X(p.geometry) AS lon,
+           p.brand.names.primary AS brand,
+           strftime(
+             (SELECT max(CAST(s.update_time AS TIMESTAMP)) FROM unnest(p.sources) AS t(s)
+                WHERE s.dataset NOT ILIKE 'Overture%'),
+             '%Y-%m'
+           ) AS seen
+    FROM read_parquet('${OVERTURE_PLACES}', hive_partitioning = 1) p
+    JOIN cells c
+      ON c.gx = CAST(floor(p.bbox.xmin / ${FOOD_CELL_DEG}) AS BIGINT)
+     AND c.gy = CAST(floor(p.bbox.ymin / ${FOOD_CELL_DEG}) AS BIGINT)
+    WHERE p.confidence >= ${FOOD_MIN_CONFIDENCE}
+      AND p.bbox.ymin BETWEEN 17 AND 72
+      AND p.names.primary IS NOT NULL
+      AND coalesce(p.operating_status, 'unknown') <> 'permanently_closed'
+      AND (SELECT max(s.confidence) FROM unnest(p.sources) AS t(s)
+             WHERE s.dataset NOT ILIKE 'Overture%' AND s.confidence IS NOT NULL)
+          >= ${FOOD_MIN_PROVIDER_CONFIDENCE}
+      AND (SELECT max(CAST(s.update_time AS TIMESTAMP)) FROM unnest(p.sources) AS t(s)
+             WHERE s.dataset NOT ILIKE 'Overture%')
+          >= CAST(now() AS TIMESTAMP) - INTERVAL ${FOOD_MAX_AGE_YEARS} YEAR
+  `)
+  const places = reader.getRowObjects().filter((place) => place.name && overtureKind(place.category))
+  writeFileSync(cachePath, JSON.stringify(places))
+  return places
+}
+
+/** The aerodrome and terminal outlines in a tile. Geometry only, no tags to speak of. */
+async function fetchFences(south, west) {
+  const cachePath = resolve(CACHE_DIR, 'fences', `${south}_${west}.json`)
+  if (existsSync(cachePath)) return JSON.parse(readFileSync(cachePath, 'utf8'))
+
+  const bbox = `${south},${west},${south + FOOD_TILE_DEG},${west + FOOD_TILE_DEG}`
+  const query = `[out:json][timeout:600];
+(way["aeroway"~"^(aerodrome|terminal)$"](${bbox});
+ rel["aeroway"~"^(aerodrome|terminal)$"](${bbox}););
+out geom;`
+
+  let elements
+  for (let attempt = 0; attempt < 5 && !elements; attempt++) {
+    const response = await fetch(OVERPASS, {
+      method: 'POST',
+      // Overpass turns away the default runtime user agent, and asks callers to
+      // identify themselves in any case.
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'timebuilder-data-build (https://github.com/JeremyDwayne/timebuilder)',
+      },
+      body: `data=${encodeURIComponent(query)}`,
+    })
+    if (response.status === 429 || response.status === 504) {
+      console.log('  overpass busy, pausing 60s')
+      await sleep(60_000)
+      continue
+    }
+    if (!response.ok) throw new Error(`overpass ${response.status} for ${bbox}`)
+    elements = (await response.json()).elements ?? []
+  }
+  if (!elements) throw new Error(`overpass would not answer for ${bbox}`)
+
+  await mkdir(dirname(cachePath), { recursive: true })
+  writeFileSync(cachePath, JSON.stringify(elements))
+  return elements
+}
+
+/** Eateries OpenStreetMap has inside an aerodrome. Kept for their opening hours. */
+async function fetchOsmFood(south, west) {
+  const cachePath = resolve(CACHE_DIR, 'food', `${south}_${west}.json`)
+  if (existsSync(cachePath)) return JSON.parse(readFileSync(cachePath, 'utf8'))
+
+  const bbox = `${south},${west},${south + FOOD_TILE_DEG},${west + FOOD_TILE_DEG}`
+  const kinds = 'restaurant|cafe|fast_food|bar|pub'
+  const query = `[out:json][timeout:600];
+(way["aeroway"="aerodrome"](${bbox}); rel["aeroway"="aerodrome"](${bbox});)->.ad;
+.ad map_to_area->.a;
+(
+  node["amenity"~"^(${kinds})$"](area.a);
+  way["amenity"~"^(${kinds})$"](area.a);
+);
+out center tags;`
+
+  let elements
+  for (let attempt = 0; attempt < 5 && !elements; attempt++) {
+    const response = await fetch(OVERPASS, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'timebuilder-data-build (https://github.com/JeremyDwayne/timebuilder)',
+      },
+      body: `data=${encodeURIComponent(query)}`,
+    })
+    if (response.status === 429 || response.status === 504) {
+      console.log('  overpass busy, pausing 60s')
+      await sleep(60_000)
+      continue
+    }
+    if (!response.ok) throw new Error(`overpass ${response.status} for ${bbox}`)
+    elements = (await response.json()).elements ?? []
+  }
+  if (!elements) throw new Error(`overpass would not answer for ${bbox}`)
+
+  await mkdir(dirname(cachePath), { recursive: true })
+  writeFileSync(cachePath, JSON.stringify(elements))
+  return elements
+}
+
+const airlineIdents = await airlineFields()
+const isAirlineField = (airport) => airlineIdents.has(airport.icao)
+
+/** Tiles that hold at least one of our airports; the rest are open water. */
+const foodTiles = new Map()
+for (const airport of builtAirports) {
+  const south = Math.floor(airport.lat / FOOD_TILE_DEG) * FOOD_TILE_DEG
+  const west = Math.floor(airport.lon / FOOD_TILE_DEG) * FOOD_TILE_DEG
+  foodTiles.set(`${south}_${west}`, { south, west })
+}
+
+console.log(`restaurants: ${foodTiles.size} tiles of boundaries`)
+
+const aerodromeRings = []
+const terminalRings = []
+/** OSM's own eateries, kept aside for the hours they carry. */
+const osmFood = []
+let tileNumber = 0
+
+for (const tile of foodTiles.values()) {
+  tileNumber++
+  const fresh = !existsSync(resolve(CACHE_DIR, 'fences', `${tile.south}_${tile.west}.json`))
+  for (const element of await fetchFences(tile.south, tile.west)) {
+    const target = element.tags?.aeroway === 'terminal' ? terminalRings : aerodromeRings
+    target.push(...outerRings(element))
+  }
+  for (const element of await fetchOsmFood(tile.south, tile.west)) {
+    const tags = element.tags ?? {}
+    if (!tags.name) continue
+    const lat = element.lat ?? element.center?.lat
+    const lon = element.lon ?? element.center?.lon
+    if (typeof lat !== 'number' || typeof lon !== 'number') continue
+    osmFood.push({ lat, lon, tags })
+  }
+  process.stdout.write(`\r  tile ${tileNumber}/${foodTiles.size}   `)
+  if (fresh) await sleep(FOOD_PACE_MS)
+}
+process.stdout.write('\n')
+console.log(`restaurants: ${aerodromeRings.length} aerodrome outlines, ${terminalRings.length} terminals`)
+
+const places = await overturePlaces()
+console.log(`restaurants: ${places.length} Overture entries near a field, ${osmFood.length} from OSM`)
+
+/**
+ * The outline each field sits inside, where OpenStreetMap has drawn one. Roughly
+ * four fields in five; the rest fall back to a tight radius, which is the only
+ * thing keeping the neighbouring high street out.
+ */
+const fenceByAirport = new Map()
+for (const airport of builtAirports) {
+  const rings = aerodromeRings.filter((ring) => inRing(ring, airport.lat, airport.lon))
+  if (rings.length) fenceByAirport.set(airport.id, rings)
+}
+console.log(`restaurants: ${fenceByAirport.size} of ${builtAirports.length} fields have a mapped boundary`)
+
+/**
+ * Airports bucketed by a tenth of a degree, so placing a few hundred thousand
+ * Overture rows is a handful of lookups each rather than a scan of all 4,718.
+ */
+const airportGrid = new Map()
+for (const airport of builtAirports) {
+  const key = `${Math.floor(airport.lat * 10)},${Math.floor(airport.lon * 10)}`
+  const bucket = airportGrid.get(key)
+  if (bucket) bucket.push(airport)
+  else airportGrid.set(key, [airport])
+}
+
+/**
+ * Which field a place belongs to. The nearest one whose fence encloses it, or
+ * failing that the nearest unfenced one close enough that nothing else could
+ * reasonably be meant.
+ */
+function fieldFor(lat, lon) {
+  const near = []
+  const gy = Math.floor(lat * 10)
+  const gx = Math.floor(lon * 10)
+  // A tenth of a degree is six nautical miles of latitude, comfortably wider
+  // than the cap, so the bucket and its neighbours cover everything in range.
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (const airport of airportGrid.get(`${gy + dy},${gx + dx}`) ?? []) {
+        const distance = nauticalMiles(lat, lon, airport.lat, airport.lon)
+        if (distance <= FOOD_MAX_NM) near.push({ airport, distance })
+      }
+    }
+  }
+  near.sort((a, b) => a.distance - b.distance)
+  // A boundary is a fact and a radius is a guess, so every fence is tried before
+  // any radius. Otherwise a place inside one field's fence could be handed to an
+  // unfenced neighbour that happened to be a few hundred yards closer.
+  for (const { airport } of near) {
+    const fence = fenceByAirport.get(airport.id)
+    if (fence?.some((ring) => inRing(ring, lat, lon))) return airport
+  }
+  for (const { airport, distance } of near) {
+    if (!fenceByAirport.has(airport.id) && distance <= FOOD_UNFENCED_NM) return airport
+  }
+  return undefined
+}
+
+/** Names are compared loosely, since the two sources punctuate and accent differently. */
+const nameKey = (name) =>
+  name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/^the\s+/, '')
+    .replace(/[^a-z0-9]/g, '')
+
+/** Keyed by airport id, then by normalised name. */
+const foodByAirport = new Map()
+
+function record(airport, name, build) {
+  const byName = foodByAirport.get(airport.id) ?? new Map()
+  const key = nameKey(name)
+  /**
+   * "The Perfect Landing" and "The Perfect Landing Restaurant" are one place,
+   * and the two sources disagree about which it is called. Eight characters is
+   * long enough that a shared prefix is not a coincidence.
+   */
+  const merged = [...byName.keys()].find(
+    (seen) =>
+      seen === key ||
+      (Math.min(seen.length, key.length) >= 8 &&
+        (seen.startsWith(key) || key.startsWith(seen))),
+  )
+  const target = merged ?? key
+  byName.set(target, build(byName.get(target)))
+  foodByAirport.set(airport.id, byName)
+}
+
+for (const place of places) {
+  const kind = overtureKind(place.category)
+  if (!kind) continue
+  const airport = fieldFor(place.lat, place.lon)
+  if (!airport) continue
+  record(airport, place.name, (existing) => ({
+    name: text(place.name),
+    kind,
+    cuisine: '',
+    hours: '',
+    phone: '',
+    website: '',
+    seen: text(place.seen),
+    terminal: terminalRings.some((ring) => inRing(ring, place.lat, place.lon)),
+    chain: Boolean(place.brand),
+    outdoor: false,
+    airline: isAirlineField(airport),
+    ...existing,
+  }))
+}
+
+const OSM_KINDS = ['restaurant', 'cafe', 'fast_food', 'bar', 'pub']
+for (const entry of osmFood) {
+  const { tags } = entry
+  if (!OSM_KINDS.includes(tags.amenity)) continue
+  const airport = fieldFor(entry.lat, entry.lon)
+  if (!airport) continue
+  // Overture is the better source for the name and the kind, so where both have
+  // a place the OSM record only fills in what Overture does not carry at all.
+  record(airport, tags.name, (existing) => ({
+    name: existing?.name ?? text(tags.name),
+    kind: existing?.kind ?? tags.amenity,
+    cuisine: text((tags.cuisine ?? '').split(';')[0].replace(/_/g, ' ')),
+    hours: text(tags.opening_hours),
+    phone: text(tags.phone ?? tags['contact:phone'] ?? ''),
+    website: text(tags.website ?? tags['contact:website'] ?? ''),
+    // OSM's own `check_date` is when a mapper last stood in front of the place,
+    // which is the same thing Overture's provider timestamp records. The later
+    // of the two wins, since either is evidence the place was still there.
+    seen: [existing?.seen ?? '', text(tags.check_date ?? '').slice(0, 7)].sort().at(-1) ?? '',
+    terminal:
+      existing?.terminal ?? terminalRings.some((ring) => inRing(ring, entry.lat, entry.lon)),
+    chain: existing?.chain ?? Boolean(tags.brand || tags['brand:wikidata']),
+    outdoor: tags.outdoor_seating === 'yes',
+    airline: isAirlineField(airport),
+  }))
+}
+
+const restaurantRows = []
+for (const [airportId, byName] of foodByAirport) {
+  for (const entry of byName.values()) {
+    if (!entry.name) continue
+    // 1 inside an airline terminal, 2 a branded chain, 4 outdoor seating,
+    // 8 at a field the airlines serve. The first three are properties of the
+    // place; the fourth is a property of the field it sits on, carried per row
+    // so the filter is one bit test rather than a second lookup.
+    const flags =
+      (entry.terminal ? 1 : 0) |
+      (entry.chain ? 2 : 0) |
+      (entry.outdoor ? 4 : 0) |
+      (entry.airline ? 8 : 0)
+    restaurantRows.push(
+      [airportId, entry.name, entry.kind, entry.cuisine, entry.hours, entry.phone, entry.website, flags, entry.seen ?? ''].join('|'),
+    )
+  }
+}
+restaurantRows.sort()
+
+const onField = restaurantRows.filter((row) => (Number(row.split('|')[7]) & 11) === 0)
+console.log(
+  `restaurants: ${foodByAirport.size} fields with anything mapped, ` +
+    `${new Set(onField.map((row) => row.split('|')[0])).size} a pilot can walk to ` +
+    `from the ramp, ${onField.length} of ${restaurantRows.length} entries`,
+)
+writeTable(
+  'restaurants',
+  'airportId|name|kind|cuisine|hours|phone|website|flags|seen',
+  restaurantRows,
+)

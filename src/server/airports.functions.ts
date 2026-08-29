@@ -5,6 +5,7 @@ import { type } from 'arktype'
 import { spinQuery } from '~/lib/search'
 import {
   airportFrequencies,
+  airportRestaurants,
   airportRunways,
   airportsNear,
   findAirport,
@@ -53,6 +54,7 @@ export const getAirport = createServerFn({ method: 'GET' })
       airport,
       runways: airportRunways(airport.id),
       frequencies: airportFrequencies(airport.id),
+      restaurants: airportRestaurants(airport.id),
       nearby: nearbyAirports(airport),
     }
   })

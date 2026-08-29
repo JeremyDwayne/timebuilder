@@ -3,16 +3,21 @@ import '@tanstack/react-start/server-only'
 import { AIRPORTS_TABLE } from '~/data/airports.generated'
 import { RUNWAYS_TABLE } from '~/data/runways.generated'
 import { FREQUENCIES_TABLE } from '~/data/frequencies.generated'
+import { RESTAURANTS_TABLE } from '~/data/restaurants.generated'
 import { boundingBox, bearingDeg, distanceNm, type LatLon } from '~/lib/geo'
 import { orderedRange, type SpinQuery } from '~/lib/search'
 import {
   frequencyTypes,
+  restaurantKinds,
   type Airport,
+  type FoodBrief,
   type Frequency,
   type FrequencyType,
   type Leg,
   type MapAirport,
   type Relative,
+  type Restaurant,
+  type RestaurantKind,
   type Runway,
 } from '~/lib/airport'
 
@@ -148,6 +153,8 @@ export function matchingLegs(query: SpinQuery): LegMatches | undefined {
   const maxNm = max * query.speed
   const box = boundingBox(origin, maxNm)
 
+  const food = fieldFoodCounts()
+
   const legs: Array<Leg> = []
   for (const airport of db().list) {
     if (airport.id === origin.id) continue
@@ -157,6 +164,7 @@ export function matchingLegs(query: SpinQuery): LegMatches | undefined {
     if (query.rwy > 0 && (airport.rwy ?? 0) < query.rwy) continue
     if (query.paved && !airport.paved) continue
     if (query.iap && !airport.iap) continue
+    if (query.food && !food.has(airport.id)) continue
 
     const nm = distanceNm(origin, airport)
     if (nm < minNm || nm > maxNm) continue
@@ -166,6 +174,7 @@ export function matchingLegs(query: SpinQuery): LegMatches | undefined {
       distanceNm: Math.round(nm),
       courseDeg: Math.round(bearingDeg(origin, airport)),
       minutes: Math.round((nm / query.speed) * 60),
+      food: food.get(airport.id) ?? 0,
     })
   }
 
@@ -257,20 +266,131 @@ export function airportFrequencies(id: string): Array<Frequency> {
   )
 }
 
+const RESTAURANT_TERMINAL = 1
+const RESTAURANT_CHAIN = 2
+const RESTAURANT_OUTDOOR = 4
+const RESTAURANT_AIRLINE = 8
+/** What disqualifies an eatery from making a field a destination. */
+const NOT_A_DESTINATION = RESTAURANT_TERMINAL | RESTAURANT_CHAIN | RESTAURANT_AIRLINE
+
+let restaurantCache: Map<string, Array<Restaurant>> | undefined
+
+function isRestaurantKind(value: string): value is RestaurantKind {
+  return (restaurantKinds as ReadonlyArray<string>).includes(value)
+}
+
+/** Field cafes first, then branded chains, then anything past security. */
+function foodRank(restaurant: Restaurant): number {
+  return restaurant.terminal ? 2 : restaurant.chain ? 1 : 0
+}
+
+/** Places to eat on the field, in the order a pilot on the ramp would reach them. */
+export function airportRestaurants(id: string): Array<Restaurant> {
+  restaurantCache ??= groupBy(
+    RESTAURANTS_TABLE,
+    ([, name, kind, cuisine, hours, phone, website, flags, seen]) => {
+      if (!name || !kind || !isRestaurantKind(kind)) return undefined
+      const bits = Number(flags)
+      return {
+        name,
+        kind,
+        cuisine: cuisine || null,
+        hours: hours || null,
+        phone: phone || null,
+        website: website || null,
+        seen: seen || null,
+        terminal: (bits & RESTAURANT_TERMINAL) !== 0,
+        chain: (bits & RESTAURANT_CHAIN) !== 0,
+        airlineField: (bits & RESTAURANT_AIRLINE) !== 0,
+        outdoorSeating: (bits & RESTAURANT_OUTDOOR) !== 0,
+      } satisfies Restaurant
+    },
+  )
+  return [...(restaurantCache.get(id) ?? [])].sort(
+    (a, b) => foodRank(a) - foodRank(b) || a.name.localeCompare(b.name),
+  )
+}
+
+let foodCountCache: Map<string, number> | undefined
+
+/**
+ * How many places to eat each field has that a pilot on the GA ramp can walk to.
+ *
+ * Three things are left out. A branded chain, which is not what anyone flies
+ * somewhere for. Anything inside a mapped terminal. And everything at a field
+ * the airlines serve, because at those the terminal test is the only guard and
+ * it does not hold: the big terminals are often unmapped or do not enclose their
+ * own restaurants, and Newark alone would otherwise contribute forty entries no
+ * pilot can reach.
+ *
+ * This is the one definition the `food` filter, the map mark and the candidate
+ * list all read, so they cannot disagree about which fields qualify.
+ */
+function fieldFoodCounts(): Map<string, number> {
+  if (!foodCountCache) {
+    foodCountCache = new Map()
+    for (const line of RESTAURANTS_TABLE.split('\n')) {
+      const fields = line.split('|')
+      const id = fields[0]
+      if (!id) continue
+      if ((Number(fields[7]) & NOT_A_DESTINATION) !== 0) continue
+      foodCountCache.set(id, (foodCountCache.get(id) ?? 0) + 1)
+    }
+  }
+  return foodCountCache
+}
+
+/**
+ * How many eateries the map payload carries per field. The popup names three and
+ * counts the rest, so a fourth would only ever be weight on the wire.
+ */
+const MAP_FOOD_SHOWN = 3
+
 /**
  * Every public-use civil airport within a radius, as context for the map. This
  * ignores the time band and the destination filters on purpose: an airport that
  * is too close, too short or unpaved still belongs on the chart.
+ *
+ * Food travels with the field rather than being asked for on click, so the popup
+ * opens already filled. Only what a popup can show is sent, and nothing at all
+ * for a field the airlines serve: Miami alone carries seventy-four entries, and
+ * naming them would have the popup contradict both the mark the map declined to
+ * draw and the filter in the header.
+ *
+ * The whole payload for a four-hour plot is 28 kB over the wire against 19 kB
+ * before food was added, on a loader held for half an hour. Sending it up front
+ * rather than fetching on click is worth that.
  */
 export function airportsNear(center: LatLon, radiusNm: number): Array<MapAirport> {
   const box = boundingBox(center, radiusNm)
+  const destinations = fieldFoodCounts()
   const near: Array<MapAirport> = []
   for (const airport of db().list) {
     if (airport.mil) continue
     if (airport.lat < box.minLat || airport.lat > box.maxLat) continue
     if (airport.lon < box.minLon || airport.lon > box.maxLon) continue
     if (distanceNm(center, airport) > radiusNm) continue
-    near.push({ id: airport.id, name: airport.name, lat: airport.lat, lon: airport.lon })
+    const restaurants = airportRestaurants(airport.id)
+    const onField = restaurants.filter((r) => !r.terminal)
+    const airlineField = restaurants.some((r) => r.airlineField)
+    near.push({
+      id: airport.id,
+      name: airport.name,
+      lat: airport.lat,
+      lon: airport.lon,
+      rwy: airport.rwy,
+      paved: airport.paved,
+      iap: airport.iap,
+      food:
+        airlineField ? []
+        : onField
+            .slice(0, MAP_FOOD_SHOWN)
+            .map(({ name, kind, hours, chain, seen }): FoodBrief => ({ name, kind, hours, chain, seen })),
+      foodCount: onField.length,
+      terminalFood: restaurants.length - onField.length,
+      fieldFood: destinations.has(airport.id),
+      airlineField,
+    })
   }
   return near
 }

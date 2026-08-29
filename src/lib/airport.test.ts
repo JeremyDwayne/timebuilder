@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatAirportLabel, formatFrequency, formatMinutes } from '~/lib/airport'
+import { formatAirportLabel, formatFrequency, formatMinutes, formatSeen } from '~/lib/airport'
 import type { Airport } from '~/lib/airport'
 
 describe('formatMinutes', () => {
@@ -35,5 +35,20 @@ describe('formatAirportLabel', () => {
   it('leads with the identifier', () => {
     const airport = { id: 'SQL', name: 'San Carlos' } as Airport
     expect(formatAirportLabel(airport)).toBe('SQL San Carlos')
+  })
+})
+
+
+describe('formatSeen', () => {
+  it('reads the stored month back as a date a person would say', () => {
+    expect(formatSeen('2026-08')).toBe('seen Aug 2026')
+    expect(formatSeen('2015-03')).toBe('seen Mar 2015')
+  })
+
+  it('says nothing rather than something wrong when there is no date', () => {
+    expect(formatSeen(null)).toBeNull()
+    expect(formatSeen('')).toBeNull()
+    expect(formatSeen('2026')).toBeNull()
+    expect(formatSeen('2026-13')).toBeNull()
   })
 })

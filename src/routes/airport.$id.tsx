@@ -2,7 +2,14 @@ import { Await, Link, createFileRoute } from '@tanstack/react-router'
 
 import { FrequencyTable } from '~/components/FrequencyTable'
 import { RunwayDiagram } from '~/components/RunwayDiagram'
-import type { FlightRules, Metar, Relative } from '~/lib/airport'
+import {
+  formatRestaurantKind,
+  formatSeen,
+  type FlightRules,
+  type Metar,
+  type Relative,
+  type Restaurant,
+} from '~/lib/airport'
 import { compassPoint } from '~/lib/geo'
 import { getAirport, getMetar } from '~/server/airports.functions'
 
@@ -32,7 +39,7 @@ export const Route = createFileRoute('/airport/$id')({
 })
 
 function AirportPage() {
-  const { airport, runways, frequencies, nearby, metar } = Route.useLoaderData()
+  const { airport, runways, frequencies, restaurants, nearby, metar } = Route.useLoaderData()
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
@@ -91,6 +98,8 @@ function AirportPage() {
         <h2 className="font-mono text-xs text-muted">Frequencies</h2>
         <FrequencyTable frequencies={frequencies} />
       </section>
+
+      {restaurants.length > 0 && <FoodSection restaurants={restaurants} />}
 
       {nearby.length > 0 && (
         <section className="mt-10">
@@ -160,6 +169,100 @@ function MetarPanel({ report, hasStation }: { report: Metar | null; hasStation: 
         </p>
       )}
     </div>
+  )
+}
+
+/**
+ * A big airline field can carry ninety entries, all of them past security and
+ * none of them reachable from the GA ramp. Those are counted rather than listed,
+ * so the section stays about the thing this tool is for.
+ */
+function FoodSection({ restaurants }: { restaurants: ReadonlyArray<Restaurant> }) {
+  const onField = restaurants.filter((restaurant) => !restaurant.terminal)
+  const terminal = restaurants.length - onField.length
+
+  return (
+    <section className="mt-10">
+      <h2 className="font-mono text-xs text-muted">Food on the field</h2>
+      {onField.length > 0 && (
+        <ul className="mt-2 divide-y divide-line border-t border-line">
+          {onField.map((restaurant) => (
+            <RestaurantRow key={restaurant.name} restaurant={restaurant} />
+          ))}
+        </ul>
+      )}
+      {terminal > 0 && (
+        <p className="mt-2 font-mono text-xs text-muted">
+          {terminal} more inside the terminal, past security, so not a destination you can walk to
+          off the ramp.
+        </p>
+      )}
+      {restaurants.some((restaurant) => restaurant.airlineField) && (
+        <p className="mt-2 font-mono text-xs text-amber">
+          The airlines serve this field, so some of the above is behind security even where it is
+          not marked as such. Check before you plan on it.
+        </p>
+      )}
+      <p className="mt-2 font-mono text-xs text-muted">
+        From Overture Maps and OpenStreetMap, and only as current as the date beside each one.
+        Nothing tells either of them when a place shuts, so ring ahead rather than planning lunch
+        around this.
+      </p>
+    </section>
+  )
+}
+
+/**
+ * Only http and https survive. These names and links are contributed to
+ * OpenStreetMap by anyone, so a `javascript:` href would otherwise reach the
+ * page verbatim.
+ */
+function safeHost(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    return parsed.hostname.replace(/^www\./, '')
+  } catch {
+    return null
+  }
+}
+
+function RestaurantRow({ restaurant }: { restaurant: Restaurant }) {
+  const host = restaurant.website ? safeHost(restaurant.website) : null
+  const facts = [
+    formatRestaurantKind(restaurant.kind),
+    restaurant.cuisine,
+    restaurant.outdoorSeating ? 'outdoor seating' : null,
+    restaurant.chain ? 'chain' : null,
+    restaurant.phone,
+  ].filter((fact): fact is string => Boolean(fact))
+
+  return (
+    <li className="py-2">
+      <div className="flex items-baseline gap-3">
+        <span className="text-sm text-text">{restaurant.name}</span>
+        <span className="ml-auto shrink-0 text-right font-mono text-xs text-muted">
+          {restaurant.hours ?? 'hours unknown'}
+          <span className="block text-[10px]">{formatSeen(restaurant.seen) ?? 'no date on record'}</span>
+        </span>
+      </div>
+      <p className="font-mono text-xs text-muted">
+        {facts.join(' \u00b7 ')}
+        {host && (
+          <>
+            {facts.length > 0 && ' \u00b7 '}
+            <a
+              href={restaurant.website!}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="text-sky underline underline-offset-4"
+            >
+              {host}
+            </a>
+          </>
+        )}
+      </p>
+    </li>
   )
 }
 

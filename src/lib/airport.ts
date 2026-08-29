@@ -33,6 +33,8 @@ export type Relative = Airport & {
 export type Leg = Relative & {
   /** One-way block time in minutes at the requested cruise speed. */
   minutes: number
+  /** How many places to eat are on the field, terminal chains excluded. */
+  food: number
 }
 
 /**
@@ -45,6 +47,80 @@ export type MapAirport = {
   name: string
   lat: number
   lon: number
+  /** Longest usable runway in feet. */
+  rwy: number | null
+  paved: boolean | null
+  iap: boolean
+  /**
+   * On-field eateries outside a terminal, independents first, capped at what a
+   * popup can show. Empty at a field the airlines serve, where naming places we
+   * cannot place relative to security would contradict both the map mark and
+   * the filter.
+   */
+  food: Array<FoodBrief>
+  /** How many there are in all, which can exceed what `food` carries. */
+  foodCount: number
+  /** How many more sit inside an airline terminal, past security. */
+  terminalFood: number
+  /** The airlines serve this field, so nothing here counts as a destination. */
+  airlineField: boolean
+  /**
+   * Whether the field earns the burger on the plot. Decided on the server from
+   * the same rule the `food` filter uses, rather than re-derived from the list
+   * here, so the map can never mark a field the wheel would not draw.
+   */
+  fieldFood: boolean
+}
+
+export const restaurantKinds = ['restaurant', 'cafe', 'fast_food', 'bar', 'pub'] as const
+export type RestaurantKind = (typeof restaurantKinds)[number]
+
+export type Restaurant = {
+  name: string
+  kind: RestaurantKind
+  /** "american", "pancake", "thai". Absent for a bit under half of them. */
+  cuisine: string | null
+  /** Raw OSM opening hours, e.g. "Mo-Su 06:00-15:00". */
+  hours: string | null
+  phone: string | null
+  website: string | null
+  /**
+   * The month a source last had eyes on the place, as "2026-08". This is the
+   * only guard against a restaurant that closed years ago, since nothing tells
+   * either dataset when one shuts.
+   */
+  seen: string | null
+  /** Inside an airline terminal, so past security rather than off the ramp. */
+  terminal: boolean
+  /** A branded chain rather than a field cafe. */
+  chain: boolean
+  /**
+   * Sits at a field the airlines serve. OpenStreetMap cannot reliably say which
+   * side of security a place at such a field is on, so none of them count as a
+   * destination even though they are all still listed.
+   */
+  airlineField: boolean
+  outdoorSeating: boolean
+}
+
+/** Just enough of an eatery to name it in a popup. */
+export type FoodBrief = Pick<Restaurant, 'name' | 'kind' | 'hours' | 'chain' | 'seen'>
+
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const
+
+/** "seen Aug 2026", or null when no source recorded a date. */
+export function formatSeen(seen: string | null): string | null {
+  if (!seen) return null
+  const [year, month] = seen.split('-')
+  const name = MONTHS[Number(month) - 1]
+  return name && year ? `seen ${name} ${year}` : null
+}
+
+/** "fast food" reads as English; the rest of the kinds already do. */
+export function formatRestaurantKind(kind: RestaurantKind): string {
+  return kind === 'fast_food' ? 'fast food' : kind
 }
 
 /** One end of a runway. Idents are magnetic, headings are true. */
