@@ -16,7 +16,13 @@ import { createTtlCache } from './cache.server'
 
 const LIST_URL = 'https://tfr.faa.gov/tfrapi/exportTfrList'
 const DETAIL_URL = 'https://tfr.faa.gov/download'
-const TIMEOUT_MS = 8_000
+/**
+ * Deliberately short. On a serverless host the whole request runs under a
+ * function ceiling that starts at ten seconds, and this call is one of several
+ * the handler makes. An unreachable feed is reported to the pilot as such, which
+ * is far better than the request dying against the ceiling with nothing said.
+ */
+const TIMEOUT_MS = 5_000
 const CONCURRENCY = 4
 const USER_AGENT = 'TimeBuilder/1.0 (general aviation trip planner)'
 

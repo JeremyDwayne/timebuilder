@@ -131,12 +131,36 @@ the request looks like a bot, so `curl` sees one chunk unless you pass a browser
 The runtime is selected in `vite.config.ts` and nowhere else:
 
 ```ts
-const preset = process.env.NITRO_PRESET ?? 'node-server'
+const preset = process.env.NITRO_PRESET
 ```
 
-Nitro presets swap the server output without touching routes, loaders or server
-functions. `NITRO_PRESET=cloudflare_module pnpm build`,
-`NITRO_PRESET=netlify pnpm build`, `NITRO_PRESET=vercel pnpm build`, and so on.
+Left undefined, Nitro reads the host it is building on. Vercel, Netlify and
+Cloudflare each identify themselves through the environment, and a plain checkout
+falls back to `node-server`, which is what `pnpm start` runs. Presets swap the
+server output without touching routes, loaders or server functions, so
+`NITRO_PRESET=cloudflare_module pnpm build` and
+`NITRO_PRESET=netlify pnpm build` force a target from a local machine.
+
+### Vercel
+
+Import the repository and take the defaults: framework preset "Other", build
+command `pnpm build`, install command `pnpm install`, output directory left
+alone. Nitro writes Build Output API v3 into `.vercel/output`, which Vercel picks
+up on its own, so there is no `vercel.json` and no environment variable to set.
+The app calls NOAA and the FAA, both open, so there are no secrets either.
+
+Two things are worth knowing about a serverless target:
+
+- The TTL cache in `cache.server.ts` lives in instance memory. Every instance
+  keeps its own and a cold start begins empty, so the METAR and TFR hit rate is
+  lower than on a long-lived node server. Nothing is incorrect, the upstreams are
+  just asked more often.
+- Function invocations run under a ceiling that starts at ten seconds. The TFR
+  timeout is set well inside it, so a slow FAA feed is reported to the pilot as
+  unreachable rather than taking the whole request down with it.
+
+`engines.node` is a floor rather than a pin: it drives which Node the build
+container runs, and Nitro stamps the matching runtime into the function config.
 
 ## Airspace and TFRs on the map
 

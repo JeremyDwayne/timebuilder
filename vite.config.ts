@@ -8,9 +8,12 @@ import { nitro } from 'nitro/vite'
  * Deployment runtime is selected here and nowhere else. Nitro presets swap the
  * server output (node-server, cloudflare_module, netlify, vercel, bun, ...)
  * without any change to routes, loaders, or server functions.
- * Override per environment with NITRO_PRESET.
+ *
+ * Left undefined, Nitro reads the host it is building on: Vercel, Netlify and
+ * Cloudflare all identify themselves through the environment, and a plain
+ * checkout falls back to node-server. Set NITRO_PRESET to override.
  */
-const preset = process.env.NITRO_PRESET ?? 'node-server'
+const preset = process.env.NITRO_PRESET
 
 export default defineConfig({
   server: { port: 3000 },
