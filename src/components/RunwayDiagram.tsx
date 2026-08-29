@@ -19,6 +19,8 @@ type Props = {
   runways: ReadonlyArray<Runway>
   /** Null while the observation is still streaming in, or when there is none. */
   report: Metar | null
+  /** The observation has not arrived yet, as opposed to there being none. */
+  pending?: boolean
 }
 
 /** Cartesian offset for a compass bearing, with north up and east right. */
@@ -82,7 +84,7 @@ function layout(runways: ReadonlyArray<Runway>, longestFt: number): Array<Placed
   return placed
 }
 
-export function RunwayDiagram({ runways, report }: Props) {
+export function RunwayDiagram({ runways, report, pending }: Props) {
   if (runways.length === 0) return null
 
   const favoured = favouredRunway(runways, report)
@@ -181,7 +183,7 @@ export function RunwayDiagram({ runways, report }: Props) {
       </svg>
 
       <div className="min-w-56">
-        <WindReadout favoured={favoured} report={report} />
+        <WindReadout favoured={favoured} report={report} pending={pending} />
 
         <table className="mt-5 w-full font-mono text-xs">
           <tbody>
@@ -272,12 +274,18 @@ function Windsock({ bearing }: { bearing: number }) {
 function WindReadout({
   favoured,
   report,
+  pending,
 }: {
   favoured: WindSolution | null
   report: Metar | null
+  pending?: boolean
 }) {
   if (!report) {
-    return <p className="font-mono text-xs text-muted">Waiting on the wind</p>
+    return (
+      <p className="font-mono text-xs text-muted">
+        {pending ? 'Waiting on the wind' : 'No wind report, so any runway works.'}
+      </p>
+    )
   }
 
   if (!favoured) {

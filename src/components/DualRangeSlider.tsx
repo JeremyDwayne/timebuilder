@@ -20,7 +20,8 @@ type Props = {
  *
  * Where the two thumbs sit on top of each other the pointer would always reach
  * the same one, so a press first decides which input to raise based on the thumb
- * it landed nearest.
+ * it landed nearest. A press outside the pair always raises the end on that
+ * side, which is what lets a range whose ends have met be pulled apart again.
  */
 export function DualRangeSlider({
   lowLabel,
@@ -72,11 +73,16 @@ export function DualRangeSlider({
 
   return (
     <div
-      className="relative h-4 w-56"
+      className="relative h-4 w-full"
       onPointerDown={(event) => {
         const box = event.currentTarget.getBoundingClientRect()
         const at = min + ((event.clientX - box.left) / box.width) * (max - min)
-        setOnTop(Math.abs(at - draft.low) <= Math.abs(at - draft.high) ? 'low' : 'high')
+        setOnTop(
+          at <= draft.low ? 'low'
+          : at >= draft.high ? 'high'
+          : Math.abs(at - draft.low) <= Math.abs(at - draft.high) ? 'low'
+          : 'high',
+        )
       }}
     >
       <div className="absolute top-1/2 h-1 w-full -translate-y-1/2 rounded-full bg-line" />

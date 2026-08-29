@@ -1,10 +1,11 @@
 import { Link, Outlet, createFileRoute, useNavigate, useRouterState } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { AirportPicker } from '~/components/AirportPicker'
 import { NumberField } from '~/components/NumberField'
 import { DualRangeSlider } from '~/components/DualRangeSlider'
 import { formatMinutes } from '~/lib/airport'
+import { readPreferences, writePreferences } from '~/lib/preferences'
 import { orderedRange, spinSearch } from '~/lib/search'
 import { getLegs } from '~/server/airports.functions'
 
@@ -50,20 +51,72 @@ function PlannerLayout() {
     select: (state): PlannerView => (state.location.pathname.endsWith('/map') ? '/map' : '/'),
   })
 
+  /**
+   * A visit with no departure airport is a fresh start, so it picks up the
+   * saved setup. A shared spin always names its departure field, which is why
+   * that one check is enough to leave someone else's link untouched.
+   */
+  const restored = useRef(false)
+  useEffect(() => {
+    if (restored.current) return
+    restored.current = true
+    if (search.from) return
+    const saved = readPreferences()
+    // The pick survives the restore, so a link that names only a destination
+    // (from the airport page or the logbook) lands back on that destination.
+    if (saved) navigate({ to: view, search: { ...saved, pick: search.pick }, replace: true })
+    // Mount only: clearing the field later is the pilot starting over, not a
+    // cue to put the old airport back.
+  }, [])
+
   /** Every control writes through the URL; the loader reruns from there. */
-  const set = (patch: Partial<typeof search>) =>
+  const edited = useRef(false)
+  const set = (patch: Partial<typeof search>) => {
+    edited.current = true
     navigate({
       to: view,
       search: (prev) => ({ ...prev, ...patch, pick: undefined }),
       replace: true,
     })
+  }
+
+  /**
+   * Saves the setup, on two conditions.
+   *
+   * A control has to have been touched, so opening someone else's link does not
+   * quietly replace your home field with theirs. And the departure identifier
+   * has to have resolved to a real airport, so a half-typed or retired code is
+   * never the thing you are handed back on your next visit. The pick is left
+   * out entirely: it belongs to one spin rather than to the pilot.
+   */
+  const { from, min, max, speed, rwy, paved, iap } = search
+  useEffect(() => {
+    if (!edited.current || !origin) return
+    writePreferences({ from, min, max, speed, rwy, paved, iap })
+  }, [origin, from, min, max, speed, rwy, paved, iap])
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-6">
-      <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+      {/*
+        Two columns on a phone, the original single row from `sm` up. The order
+        is the same in both, so the tab order always matches what is on screen:
+        where you are leaving from and how fast you fly, then the time band,
+        then what the destination has to offer.
+      */}
+      <div className="grid grid-cols-2 items-end gap-x-4 gap-y-3 sm:flex sm:flex-wrap sm:gap-x-5">
         <AirportPicker value={search.from} onChange={(from) => set({ from })} />
+        <NumberField
+          label="Cruise speed"
+          value={search.speed}
+          step={5}
+          min={40}
+          max={400}
+          suffix="kt"
+          width="w-full sm:w-20"
+          onCommit={(speed) => set({ speed })}
+        />
 
-        <div>
+        <div className="col-span-2">
           <span className="block font-mono text-xs text-muted">Leg time each way</span>
           <div className="mt-1 flex items-center gap-2">
             <NumberField
@@ -74,23 +127,26 @@ function PlannerLayout() {
               suffix="h"
               onCommit={(min) => set({ min })}
             />
-            <DualRangeSlider
-              lowLabel="Shortest leg in hours"
-              highLabel="Longest leg in hours"
-              low={committed.min}
-              high={committed.max}
-              min={0}
-              // Six hours covers any single leg worth flying for hours; the
-              // number fields still reach the schema's twelve, and the track
-              // stretches if one of them is set past the end.
-              max={Math.max(6, Math.ceil(committed.max))}
-              step={0.25}
-              onDrag={({ low, high }) => setDragging({ min: low, max: high })}
-              onCommit={({ low, high }) => {
-                setDragging(null)
-                set({ min: low, max: high })
-              }}
-            />
+            {/* The track takes the space left over on a phone and is fixed from `sm`. */}
+            <div className="min-w-0 flex-1 sm:w-56 sm:flex-none">
+              <DualRangeSlider
+                lowLabel="Shortest leg in hours"
+                highLabel="Longest leg in hours"
+                low={committed.min}
+                high={committed.max}
+                min={0}
+                // Six hours covers any single leg worth flying for hours; the
+                // number fields still reach the schema's twelve, and the track
+                // stretches if one of them is set past the end.
+                max={Math.max(6, Math.ceil(committed.max))}
+                step={0.25}
+                onDrag={({ low, high }) => setDragging({ min: low, max: high })}
+                onCommit={({ low, high }) => {
+                  setDragging(null)
+                  set({ min: low, max: high })
+                }}
+              />
+            </div>
             <NumberField
               value={range.max}
               step={0.25}
@@ -101,26 +157,18 @@ function PlannerLayout() {
             />
           </div>
         </div>
-        <NumberField
-          label="Cruise speed"
-          value={search.speed}
-          step={5}
-          min={40}
-          max={400}
-          suffix="kt"
-          onCommit={(speed) => set({ speed })}
-        />
+
         <NumberField
           label="Min runway"
           value={search.rwy}
           step={500}
           max={15000}
           suffix="ft"
-          width="w-24"
+          width="w-full sm:w-24"
           onCommit={(rwy) => set({ rwy })}
         />
 
-        <div className="flex gap-4 pb-1.5">
+        <div className="flex flex-col gap-2 pb-1 sm:flex-row sm:gap-4 sm:pb-1.5">
           <Toggle label="Paved" checked={search.paved} onChange={(paved) => set({ paved })} />
           <Toggle label="Has approach" checked={search.iap} onChange={(iap) => set({ iap })} />
         </div>

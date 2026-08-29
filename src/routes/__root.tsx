@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { HeadContent, Link, Outlet, Scripts, createRootRoute } from '@tanstack/react-router'
 
 import appCss from '~/styles.css?url'
+import { Mark } from '~/components/Mark'
 import { NotFound } from '~/components/NotFound'
 import { RouteError } from '~/components/RouteError'
 
@@ -22,7 +23,10 @@ export const Route = createRootRoute({
       },
       { name: 'theme-color', content: '#0b0f14' },
     ],
-    links: [{ rel: 'stylesheet', href: appCss }],
+    links: [
+      { rel: 'stylesheet', href: appCss },
+      { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
+    ],
   }),
   component: RootComponent,
   errorComponent: RouteError,
@@ -45,9 +49,16 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
       </head>
       <body className="min-h-screen">
         <header className="border-b border-line">
-          <nav className="mx-auto flex max-w-5xl items-baseline gap-6 px-4 py-3">
-            <Link to="/" search={{}} className="font-mono text-sm font-semibold tracking-tight">
-              TIME<span className="text-amber">BUILDER</span>
+          <nav className="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3 sm:gap-6">
+            <Link
+              to="/"
+              search={{}}
+              className="flex items-center gap-2 font-mono text-sm font-semibold tracking-tight"
+            >
+              <Mark className="size-[18px]" />
+              <span>
+                TIME<span className="text-amber">BUILDER</span>
+              </span>
             </Link>
             <Link
               to="/logbook"
@@ -56,14 +67,31 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
             >
               Logbook
             </Link>
-            <span className="ml-auto font-mono text-xs text-muted">
+            {/* Provenance, not navigation, so it is the first thing to go on a phone. */}
+            <span className="ml-auto hidden font-mono text-xs text-muted sm:block">
               US public-use fields, FAA data
             </span>
           </nav>
         </header>
         <main>{children}</main>
-        <footer className="mx-auto max-w-5xl px-4 py-10 font-mono text-xs text-muted">
-          Planning aid only. Check current charts, NOTAMs and the Chart Supplement before you fly.
+        <footer className="mx-auto max-w-5xl px-4 py-10 text-center font-mono text-xs text-muted">
+          <p>
+            Planning aid only. Check current charts, NOTAMs and the Chart Supplement before you
+            fly.
+          </p>
+          <p className="mt-1.5 flex flex-wrap items-baseline justify-center gap-x-2">
+            {/* Server and browser can straddle midnight on New Year's Eve. */}
+            <span suppressHydrationWarning>&copy; {new Date().getFullYear()} Jeremy Winterberg</span>
+            <span aria-hidden>&middot;</span>
+            <a
+              href="https://github.com/JeremyDwayne/timebuilder"
+              target="_blank"
+              rel="noreferrer"
+              className="text-sky underline underline-offset-4"
+            >
+              Source on GitHub
+            </a>
+          </p>
         </footer>
         <Scripts />
       </body>

@@ -1,5 +1,5 @@
 import { Link, createFileRoute, useLoaderData, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { Wheel } from '~/components/Wheel'
 import { compassPoint } from '~/lib/geo'
@@ -126,7 +126,7 @@ function Result({
         <Stat label="Field elev" value={leg.elev == null ? 'unknown' : `${leg.elev.toLocaleString()} ft`} />
       </dl>
 
-      <div className="mt-5 flex items-center gap-5 text-sm">
+      <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3 text-sm">
         <Link
           to="/airport/$id"
           params={{ id: leg.id }}
@@ -157,8 +157,21 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /**
+ * Hands a cell back to grid auto-placement from `sm` up, so the explicit
+ * two-line phone layout collapses to the single-row desktop one.
+ */
+const AUTO_CELL = 'sm:col-start-auto sm:row-start-auto'
+
+/**
  * The wheel is one way to choose; this is the other. Rows are buttons so the
  * whole list is reachable by keyboard as well as by pointer.
+ *
+ * A phone gets two lines per row: identifier, name and distance on the first,
+ * the city and the leg time under them. The city is what makes an unfamiliar
+ * field recognisable, so it is kept rather than dropped for width.
+ *
+ * The list is taller than its box, so a spin can land on a row well outside it.
+ * The chosen row is brought into view rather than left highlighted off-screen.
  */
 function CandidateList({
   legs,
@@ -169,27 +182,42 @@ function CandidateList({
   picked: string | undefined
   onPick: (id: string) => void
 }) {
+  const activeRow = useRef<HTMLLIElement>(null)
+
+  useEffect(() => {
+    // `nearest` scrolls the list box without dragging the page around it.
+    activeRow.current?.scrollIntoView({ block: 'nearest' })
+  }, [picked])
+
   return (
     <ul className="mt-2 max-h-96 overflow-y-auto border-t border-line">
       {legs.map((leg) => {
         const active = leg.id === picked
         return (
-          <li key={leg.id}>
+          <li key={leg.id} ref={active ? activeRow : undefined}>
             <button
               type="button"
               onClick={() => onPick(leg.id)}
               aria-current={active}
-              className={`grid w-full grid-cols-[3rem_1fr_9rem_4.5rem_3.5rem] items-baseline gap-x-3 border-b border-line/60 px-1 py-1 text-left font-mono text-xs ${
+              className={`grid w-full grid-cols-[3rem_1fr_auto] items-baseline gap-x-3 gap-y-0.5 border-b border-line/60 px-1 py-1.5 text-left font-mono text-xs sm:grid-cols-[3rem_1fr_9rem_4.5rem_3.5rem] sm:gap-y-0 sm:py-1 ${
                 active ? 'bg-ink-700' : 'hover:bg-ink-800'
               }`}
             >
-              <span className="text-amber">{leg.id}</span>
-              <span className="truncate font-sans text-text">{leg.name}</span>
-              <span className="truncate text-muted">
+              <span className={`col-start-1 row-start-1 text-amber ${AUTO_CELL}`}>{leg.id}</span>
+              <span className={`col-start-2 row-start-1 truncate font-sans text-text ${AUTO_CELL}`}>
+                {leg.name}
+              </span>
+              <span className={`col-start-2 row-start-2 truncate text-muted ${AUTO_CELL}`}>
                 {leg.city}, {leg.state}
               </span>
-              <span className="text-right tabular-nums">{leg.distanceNm} nm</span>
-              <span className="text-right tabular-nums text-muted">
+              <span
+                className={`col-start-3 row-start-1 text-right tabular-nums ${AUTO_CELL}`}
+              >
+                {leg.distanceNm} nm
+              </span>
+              <span
+                className={`col-start-3 row-start-2 text-right tabular-nums text-muted ${AUTO_CELL}`}
+              >
                 {formatMinutes(leg.minutes)}
               </span>
             </button>

@@ -77,7 +77,10 @@ function AirportPage() {
               The layout renders straight away from the loader's field data; the
               streamed observation only adds the sock and the favoured runway.
             */}
-            <Await promise={metar} fallback={<RunwayDiagram runways={runways} report={null} />}>
+            <Await
+              promise={metar}
+              fallback={<RunwayDiagram runways={runways} report={null} pending />}
+            >
               {(report) => <RunwayDiagram runways={runways} report={report} />}
             </Await>
           </div>
@@ -100,7 +103,12 @@ function AirportPage() {
         </section>
       )}
 
-      <Link to="/" search={{}} className="mt-10 inline-block text-sm text-sky underline underline-offset-4">
+      {/* Naming the pick is enough: the planner restores the rest of the setup. */}
+      <Link
+        to="/"
+        search={{ pick: airport.id }}
+        className="mt-10 inline-block text-sm text-sky underline underline-offset-4"
+      >
         Back to the wheel
       </Link>
     </div>

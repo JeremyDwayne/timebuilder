@@ -1,5 +1,31 @@
 @import 'tailwindcss';
 
+/*
+ * Self-hosted rather than borrowed from the system. The mono faces macOS
+ * resolves first, SF Mono and Menlo, carry no slashed or dotted zero at all, so
+ * asking for one through CSS is silently ignored and 2O6 reads the same as 206.
+ * Those are two real airports. JetBrains Mono draws the two apart on its own.
+ *
+ * Latin subset, the two weights the app actually uses, about 21 KB each.
+ */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2')
+    format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-600-normal.woff2')
+    format('woff2');
+}
+
 @theme {
   --color-ink-900: #0b0f14;
   --color-ink-800: #11161d;
@@ -10,7 +36,7 @@
   --color-muted: #97a3b4;
   --color-amber: #f2b134;
   --color-sky: #64b5f6;
-  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
 :root {
@@ -90,4 +116,17 @@ body {
 .dual-range:focus-visible::-moz-range-thumb {
   outline: 2px solid var(--color-sky);
   outline-offset: 1px;
+}
+
+/*
+ * Belt and braces on the zero. JetBrains Mono already draws it apart from a
+ * capital O, and this asks for the alternate as well so the fallback faces do
+ * whatever they can during the swap.
+ *
+ * Written as font-feature-settings rather than font-variant-numeric because the
+ * latter is overwritten by the tabular-nums utility on the very columns that
+ * carry the identifiers.
+ */
+.font-mono {
+  font-feature-settings: 'zero' 1;
 }
