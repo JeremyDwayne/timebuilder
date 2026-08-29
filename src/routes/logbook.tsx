@@ -39,24 +39,30 @@ function LogbookPage() {
       ) : (
         <ul className="mt-6 divide-y divide-line border-y border-line">
           {entries.map((entry) => (
-            <li key={entry.loggedAt} className="flex items-baseline gap-3 py-2 font-mono text-xs">
-              <span className="w-24 shrink-0 text-muted">{entry.loggedAt.slice(0, 10)}</span>
-              <span className="w-12 shrink-0 text-muted">{entry.from}</span>
+            <li
+              key={entry.loggedAt}
+              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2 font-mono text-xs"
+            >
+              <span className="w-20 shrink-0 text-muted">{entry.loggedAt.slice(0, 10)}</span>
+              <span className="w-8 shrink-0 text-muted">{entry.from}</span>
               <Link
                 to="/airport/$id"
                 params={{ id: entry.id }}
-                className="w-12 shrink-0 text-amber underline underline-offset-4"
+                className="w-10 shrink-0 text-amber underline underline-offset-4"
               >
                 {entry.id}
               </Link>
-              <span className="truncate font-sans text-sm text-text">{entry.name}</span>
+              {/* The name drops to its own line on a phone rather than truncating to nothing. */}
+              <span className="order-last w-full truncate font-sans text-sm text-text sm:order-none sm:w-auto">
+                {entry.name}
+              </span>
               <span className="ml-auto shrink-0 tabular-nums text-muted">
                 {entry.distanceNm} nm · {formatMinutes(entry.minutes * 2)}
               </span>
               <button
                 type="button"
                 onClick={() => setEntries(removeEntry(entry.loggedAt))}
-                className="shrink-0 text-muted hover:text-text"
+                className="-my-1 shrink-0 px-1.5 py-1 text-muted hover:text-text"
                 aria-label={`Remove ${entry.id}`}
               >
                 ×

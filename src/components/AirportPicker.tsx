@@ -59,7 +59,7 @@ export function AirportPicker({ value, onChange }: Props) {
         autoComplete="off"
         spellCheck={false}
         placeholder="SQL"
-        className="mt-1 w-28 rounded border border-line bg-ink-800 px-2 py-1.5 font-mono text-sm uppercase"
+        className="mt-1 w-full rounded border border-line bg-ink-800 px-2 py-1.5 font-mono text-sm uppercase sm:w-28"
         onChange={(e) => {
           setText(e.target.value)
           setOpen(true)
@@ -74,7 +74,7 @@ export function AirportPicker({ value, onChange }: Props) {
         }}
       />
       {open && matches.length > 0 && (
-        <ul className="absolute z-20 mt-1 w-80 overflow-hidden rounded border border-line bg-ink-800 shadow-xl">
+        <ul className="absolute z-20 mt-1 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded border border-line bg-ink-800 shadow-xl">
           {matches.map((airport) => (
             <li key={airport.id}>
               <button

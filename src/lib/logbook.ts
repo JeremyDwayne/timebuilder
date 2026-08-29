@@ -1,4 +1,5 @@
 import type { Leg } from '~/lib/airport'
+import { readJson, writeJson } from '~/lib/storage'
 
 /**
  * Spins the pilot has decided to fly, kept in localStorage. Nothing here is
@@ -19,25 +20,14 @@ export type LogEntry = {
   loggedAt: string
 }
 
-/** Storage can be absent or refuse to write (private mode, quota); never let that throw. */
 function write(entries: Array<LogEntry>): Array<LogEntry> {
-  if (typeof window === 'undefined') return entries
-  try {
-    window.localStorage.setItem(KEY, JSON.stringify(entries))
-  } catch {
-    // The list still returns, it just does not survive a reload.
-  }
+  writeJson(KEY, entries)
   return entries
 }
 
 function read(): Array<LogEntry> {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(KEY)
-    return raw ? (JSON.parse(raw) as Array<LogEntry>) : []
-  } catch {
-    return []
-  }
+  const stored = readJson(KEY)
+  return Array.isArray(stored) ? (stored as Array<LogEntry>) : []
 }
 
 export function listEntries(): Array<LogEntry> {

@@ -58,6 +58,23 @@ several minutes; raw pulls are kept in `.cache/` and reused on a re-run.
 | `airport/$id` | `true` + streaming | Field data flushes immediately, the METAR streams in behind it |
 | `logbook` | `false` | Every byte comes from `localStorage`, so there is nothing to render on the server |
 
+### Remembered setup
+
+The URL stays the source of truth for any one spin. Alongside it,
+`src/lib/preferences.ts` keeps the pilot's own setup in `localStorage`: departure
+field, time band, cruise speed, runway minimum and the two filters. A departure
+airport and a cruise speed describe the aeroplane and the home field rather than
+the trip, so they should not have to be re-entered every visit.
+
+A visit that names no departure airport picks the saved setup up; a shared spin
+always names one, which is what keeps someone else's link intact. The setup is
+saved only once a control has actually been touched and only when the identifier
+resolved to a real airport, so opening a link does not replace your home field
+and a half-typed code is never handed back to you. The `?pick=` is never saved.
+Stored values are re-validated through the same ArkType schema the address bar
+uses, so a blob left by an older version cannot put the app into a state the URL
+could not.
+
 ### Search params
 
 `src/lib/search.ts` defines the schema with ArkType, wired to the layout route
@@ -180,17 +197,25 @@ a drag rather than a click. Labels all share one reservation list, and airports 
 because they are what the map is for. A Class D is centred on its airport, so its
 "D 26/SFC" annotation used to print straight over the field it belongs to; it now
 falls back to the top of the shape, the way a sectional prints it, and is dropped
-altogether only when there is nowhere left. In dense areas at low zoom that means
-few airspace annotations survive, which is the intended trade: the line styles and
-the legend still identify each kind, clicking names it outright, and zooming in
-gives the annotations room.
+altogether when there is nowhere left or when the label budget below is spent. In
+dense areas at low zoom that means few airspace annotations survive, which is the
+intended trade: the line styles and the legend still identify each kind, clicking
+names it outright, and zooming in gives the annotations room.
 
 Every public-use field in view is plotted, not only the ones the time band
-selects. Candidates are bright, everything else is dim, and both carry their
-identifier, dropped only where two labels would collide, so zooming in names more
-of them. Dots have a dark ring so an airport stays legible where it sits on an
-airspace boundary. Clicking a field the band excludes names it, gives its
-distance and time, and offers to stretch the band far enough to include it.
+selects. Candidates are bright and everything else is dim. Dots have a dark ring
+so an airport stays legible where it sits on an airspace boundary. Clicking a
+field the band excludes names it, gives its distance and time, and offers to
+stretch the band far enough to include it.
+
+Identifiers are rationed by a budget, `src/lib/map-labels.ts`. Collision
+avoidance alone only stops two labels overlapping, and a wide band can hold
+several hundred fields that all fit somewhere, which buries the chart under its
+own text. The budget scales with canvas area, so a phone is not handed a
+desktop's worth of labels, and with the log of the zoom, so moving in is what
+reveals more, the way unfolding a sectional does. It is spent on whatever is
+picked or hovered first, then the fields in range, then the rest; the origin and
+the active field are exempt and are never dropped.
 
 Drawing only candidates was wrong: a Class D circle exists because there is a
 towered airport at its centre, so leaving that airport out because it was a
@@ -219,8 +244,13 @@ edge distance are checked.
 
 ## Tests
 
-`pnpm test` runs vitest over the pure modules and the generated tables, with no
-DOM and no network:
+`pnpm test` runs vitest. Nothing reaches the network: the two modules that make
+outbound calls are driven against a stubbed `fetch`. Node is the default
+environment, and the files that need a browser opt in with a
+`@vitest-environment jsdom` docblock, so a pure module is never tested against a
+DOM it will not run in.
+
+Pure modules:
 
 - `src/lib/geo` great-circle distance and bearing against published figures, and
   that the bounding box never rejects a point inside the radius it stands for.
@@ -230,11 +260,42 @@ DOM and no network:
   polygon, and the two range failures described above.
 - `src/lib/search` the ArkType schema: defaults, string parsing from a URL, and
   clamping instead of rejection.
+- `src/lib/sample` that a seed gives the server and the client the same wheel,
+  and that a draw never repeats an airport or sticks to the near end of the band.
+- `src/lib/airport` and `src/lib/airspace` the formatters, plus the rule that no
+  two airspace kinds share both a stroke and a dash pattern, since hue alone
+  cannot be the signal.
+- `src/lib/map-labels` the label budget: that it grows with zoom, spends less on
+  a phone, and never returns a fraction or a NaN.
+
+Data and server:
+
 - `src/data` every generated row against its declared field count, so a data
   refresh that smuggled a `|` into a name would fail rather than shift every
   field after it.
 - `src/server/airport-db` the in-range invariant: the capped candidate list, the
   identifier set and a `?pick=` lookup all agree with the full match set.
+- `src/server/geography` and `src/server/airspace` that the delta-encoded rings
+  decode back onto the United States, and that the cheap bounding-box filter
+  never drops an area that genuinely reaches the radius.
+- `src/server/cache` time-to-live expiry, eviction, and that concurrent misses
+  for one key collapse into a single upstream call.
+- `src/server/weather` the AWC field mapping against a stubbed feed, including a
+  variable wind, millibars to inches, and every way a report can be absent.
+- `src/server/tfr` the XNOTAM parser end to end against a stubbed FAA feed:
+  circle, polygon and arc boundaries, per-part altitude limits, the nested
+  reference blocks that would otherwise be read as vertices, the state filter,
+  and the count of restrictions that could not be drawn.
+
+Browser (`jsdom`):
+
+- `src/lib/storage`, `src/lib/preferences` and `src/lib/logbook` the localStorage
+  layer: round trips, a corrupt or stale blob, and storage that refuses to answer.
+- `src/components/NumberField` when a value is allowed to leave the field, and
+  what it has been rounded to when it does.
+- `src/components/DualRangeSlider` that the ends may meet but never cross, that a
+  drag fires one navigation rather than one per pixel, and that a range whose
+  ends have met can still be pulled apart.
 
 ## Caveats
 

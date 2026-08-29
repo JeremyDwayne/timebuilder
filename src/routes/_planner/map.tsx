@@ -11,6 +11,7 @@ import {
   type AirspaceKind,
 } from '~/lib/airspace'
 import { bearingDeg, compassPoint, distanceNm, type LatLon } from '~/lib/geo'
+import { labelBudget } from '~/lib/map-labels'
 import { formatMinutes, type Airport, type MapAirport } from '~/lib/airport'
 import { tfrStyle, type Tfr, type TfrPart, type TfrReport } from '~/lib/tfr'
 import { getMapLayers, getTfrs } from '~/server/airports.functions'
@@ -56,6 +57,7 @@ const PADDING = 26
 /** An area smaller than this on screen is drawn without a label. */
 const LABEL_MIN_PX = 30
 const ALTITUDE_MIN_PX = 58
+
 /** How far inside the top edge an airspace annotation sits when the centre is taken. */
 const AIRSPACE_LABEL_INSET_PX = 12
 const MIN_ZOOM = 0.6
@@ -430,37 +432,44 @@ function MapPage() {
       reserve(cx, cy + 14, ctx.measureText(origin.id).width / 2, 9)
       reserve(cx, cy, 6, 6)
 
-      /** An identifier set beside its dot, if there is room for it. */
+      /** An identifier set beside its dot. False when there was no room for it. */
       const labelAirport = (id: string, x: number, y: number, colour: string, size: number) => {
         ctx.font = `${size}px ui-monospace, monospace`
         const width = ctx.measureText(id).width
         const lx = x + 6 + width / 2
         const ly = y + 1
-        if (!fits(lx, ly, width / 2, size / 2 + 1)) return
+        if (!fits(lx, ly, width / 2, size / 2 + 1)) return false
         reserve(lx, ly, width / 2, size / 2 + 1)
         reserve(x, y, 4, 4)
         ctx.textAlign = 'center'
         ctx.strokeText(id, lx, ly)
         ctx.fillStyle = colour
         ctx.fillText(id, lx, ly)
+        return true
       }
 
       // Whatever is selected wins its spot, then the fields in range, then the
-      // rest, so zooming in names more of them.
+      // rest, so the budget is always spent on the useful ones first.
+      const budget = labelBudget(box.width, box.height, zoom)
       const byPriority = [...placed.current].sort(
         (a, b) =>
           Number(isActive(b.entry.airport.id)) - Number(isActive(a.entry.airport.id)) ||
           Number(b.entry.inRange) - Number(a.entry.inRange),
       )
+      let airportLabels = 0
       for (const { entry, x, y } of byPriority) {
         const active = isActive(entry.airport.id)
-        labelAirport(
+        // Actives sort to the front, so they are named before the budget binds
+        // and stay named however far out the plot is zoomed.
+        if (!active && airportLabels >= budget.airports) continue
+        const printed = labelAirport(
           entry.airport.id,
           x,
           y,
           active ? '#f2b134' : entry.inRange ? '#dbe3ec' : '#8b98aa',
           entry.inRange ? 10 : 9,
         )
+        if (printed && !active) airportLabels++
       }
 
       ctx.textAlign = 'center'
@@ -484,7 +493,9 @@ function MapPage() {
       const bySize = [...visibleAirspace].sort(
         (a, b) => b.ring.maxX - b.ring.minX - (a.ring.maxX - a.ring.minX),
       )
+      let airspaceLabels = 0
       for (const { area, ring } of bySize) {
+        if (airspaceLabels >= budget.airspace) break
         const widthPx = (ring.maxX - ring.minX) * scale
         if (widthPx < LABEL_MIN_PX) continue
 
@@ -507,6 +518,7 @@ function MapPage() {
         )
         if (y === undefined) continue
         reserve(x, y, halfWidth, halfHeight)
+        airspaceLabels++
 
         ctx.fillStyle = airspaceStyles[area.kind].stroke
         ctx.strokeText(text, x, y)
@@ -523,7 +535,19 @@ function MapPage() {
     const observer = new ResizeObserver(draw)
     observer.observe(canvas)
     return () => observer.disconnect()
-  }, [plotted, band, origin, picked, hover, geography, visibleAirspace, showTfrs, tfrShapes, frame])
+  }, [
+    plotted,
+    band,
+    origin,
+    picked,
+    hover,
+    geography,
+    visibleAirspace,
+    showTfrs,
+    tfrShapes,
+    frame,
+    zoom,
+  ])
 
   // A non-passive listener, so the page does not scroll while zooming the plot.
   useEffect(() => {
@@ -955,14 +979,21 @@ function TfrList({ report }: { report: TfrReport | null }) {
       </p>
       <ul className="mt-1 max-h-44 overflow-y-auto border-t border-line">
         {report.tfrs.map((tfr) => (
-          <li key={tfr.notamId} className="flex gap-3 border-b border-line/60 py-1 font-mono text-xs">
+          <li
+            key={tfr.notamId}
+            className="flex flex-wrap gap-x-3 gap-y-0.5 border-b border-line/60 py-1.5 font-mono text-xs sm:flex-nowrap sm:py-1"
+          >
             <span className="w-14 shrink-0" style={{ color: tfrStyle.stroke }}>
               {tfr.notamId}
             </span>
             <span className="w-6 shrink-0 text-muted">{tfr.state}</span>
             <span className="w-28 shrink-0 truncate text-muted">{tfr.type}</span>
-            <span className="truncate text-text">{tfr.description}</span>
-            {tfr.parts.length === 0 && <span className="ml-auto shrink-0 text-amber">not drawn</span>}
+            {/* On a phone the description would truncate to a few characters, so it
+                takes its own line and the warning stays up with the identifier. */}
+            {tfr.parts.length === 0 && (
+              <span className="ml-auto shrink-0 text-amber sm:order-last">not drawn</span>
+            )}
+            <span className="w-full truncate text-text sm:w-auto">{tfr.description}</span>
           </li>
         ))}
       </ul>
