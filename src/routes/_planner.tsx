@@ -16,7 +16,7 @@ import { getLegs } from '~/server/airports.functions'
  */
 export const Route = createFileRoute('/_planner')({
   validateSearch: spinSearch,
-  loaderDeps: ({ search: { from, min, max, speed, rwy, paved, iap } }) => ({
+  loaderDeps: ({ search: { from, min, max, speed, rwy, paved, iap, food } }) => ({
     from,
     min,
     max,
@@ -24,6 +24,7 @@ export const Route = createFileRoute('/_planner')({
     rwy,
     paved,
     iap,
+    food,
   }),
   loader: ({ deps }) => getLegs({ data: deps }),
   component: PlannerLayout,
@@ -89,11 +90,11 @@ function PlannerLayout() {
    * never the thing you are handed back on your next visit. The pick is left
    * out entirely: it belongs to one spin rather than to the pilot.
    */
-  const { from, min, max, speed, rwy, paved, iap } = search
+  const { from, min, max, speed, rwy, paved, iap, food } = search
   useEffect(() => {
     if (!edited.current || !origin) return
-    writePreferences({ from, min, max, speed, rwy, paved, iap })
-  }, [origin, from, min, max, speed, rwy, paved, iap])
+    writePreferences({ from, min, max, speed, rwy, paved, iap, food })
+  }, [origin, from, min, max, speed, rwy, paved, iap, food])
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-6">
@@ -171,6 +172,7 @@ function PlannerLayout() {
         <div className="flex flex-col gap-2 pb-1 sm:flex-row sm:gap-4 sm:pb-1.5">
           <Toggle label="Paved" checked={search.paved} onChange={(paved) => set({ paved })} />
           <Toggle label="Has approach" checked={search.iap} onChange={(iap) => set({ iap })} />
+          <Toggle label="Food on field" checked={search.food} onChange={(food) => set({ food })} />
         </div>
       </div>
 

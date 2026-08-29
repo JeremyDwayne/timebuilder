@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest'
 
 import { distanceNm } from '~/lib/geo'
 import type { SpinQuery } from '~/lib/search'
-import { findAirport, findLeg, findLegs, inRangeIds, matchingLegs } from '~/server/airport-db.server'
+import {
+  airportRestaurants,
+  airportsNear,
+  findAirport,
+  findLeg,
+  findLegs,
+  inRangeIds,
+  matchingLegs,
+} from '~/server/airport-db.server'
 
 const base: SpinQuery = {
   from: 'LAL',
@@ -12,6 +20,7 @@ const base: SpinQuery = {
   rwy: 2000,
   paved: true,
   iap: false,
+  food: false,
 }
 
 const query = (patch: Partial<SpinQuery> = {}): SpinQuery => ({ ...base, ...patch })
@@ -50,11 +59,77 @@ describe('matchingLegs', () => {
   it('applies each destination filter', () => {
     expect(matchingLegs(query({ iap: true }))!.legs.every((leg) => leg.iap)).toBe(true)
     expect(matchingLegs(query({ paved: true }))!.legs.every((leg) => leg.paved)).toBe(true)
+    expect(matchingLegs(query({ food: true }))!.legs.every((leg) => leg.food > 0)).toBe(true)
     expect(matchingLegs(query({ rwy: 5000 }))!.legs.every((leg) => (leg.rwy ?? 0) >= 5000)).toBe(true)
     // A tighter filter can only ever remove candidates.
     expect(matchingLegs(query({ rwy: 5000 }))!.legs.length).toBeLessThan(
       matchingLegs(query({ rwy: 2000 }))!.legs.length,
     )
+  })
+
+  /**
+   * The count, the filter and the map mark have to be the same rule. If they
+   * drifted apart the plot could mark a field the wheel would never draw.
+   */
+  it('counts food only where the filter would also keep the field', () => {
+    const all = matchingLegs(query())!.legs
+    const withFood = matchingLegs(query({ food: true }))!.legs
+    expect(withFood.map((leg) => leg.id)).toEqual(
+      all.filter((leg) => leg.food > 0).map((leg) => leg.id),
+    )
+    expect(withFood.length).toBeGreaterThan(0)
+    expect(withFood.length).toBeLessThan(all.length)
+  })
+
+  /**
+   * The map payload has to agree with the mark it draws. Miami carries
+   * seventy-four entries and none of them are a destination, so a popup that
+   * named them would say the opposite of the burger the plot did not draw.
+   */
+  it('never hands the map food to name at a field it refuses to mark', () => {
+    const airline = ['MIA', 'BOS', 'DEN', 'SEA']
+    for (const id of airline) {
+      const field = airportsNear(findAirport(id)!, 1).find((f) => f.id === id)
+      expect(field, id).toBeDefined()
+      expect(field!.airlineField, id).toBe(true)
+      expect(field!.fieldFood, id).toBe(false)
+      expect(field!.food, id).toEqual([])
+      // The counts survive, so the popup can still say why it is naming nothing.
+      expect(field!.foodCount + field!.terminalFood, id).toBeGreaterThan(0)
+    }
+  })
+
+  it('sends no more of a field than the popup can show', () => {
+    for (const field of airportsNear(findAirport('LAL')!, 400)) {
+      expect(field.food.length).toBeLessThanOrEqual(3)
+      expect(field.food.length).toBeLessThanOrEqual(field.foodCount)
+      if (field.fieldFood) expect(field.food.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('marks exactly those fields on the map, and no others', () => {
+    const legs = matchingLegs(query())!.legs
+    const marked = new Map(
+      airportsNear(findAirport('LAL')!, 400).map((field) => [field.id, field.fieldFood]),
+    )
+    for (const leg of legs) {
+      if (marked.has(leg.id)) expect(marked.get(leg.id)).toBe(leg.food > 0)
+    }
+  })
+
+  /**
+   * Miami and Fort Lauderdale both carry plenty of mapped food and both sit
+   * inside the band from Lakeland, so if the airline-field guard ever came off
+   * they would show up as hamburger runs.
+   */
+  it('never counts food at a field the airlines serve', () => {
+    const reachable = matchingLegs(query({ food: true }))!.legs.map((leg) => leg.id)
+    for (const id of ['MIA', 'FLL']) {
+      const places = airportRestaurants(id)
+      expect(places.length).toBeGreaterThan(0)
+      expect(places.every((place) => place.airlineField)).toBe(true)
+      expect(reachable).not.toContain(id)
+    }
   })
 
   it('lets a pattern-length hop qualify when the floor is zero', () => {

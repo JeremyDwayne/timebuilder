@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Wheel } from '~/components/Wheel'
 import { compassPoint } from '~/lib/geo'
 import { formatMinutes, type Leg } from '~/lib/airport'
+import { FoodMark } from '~/components/FoodMark'
 import { addEntry } from '~/lib/logbook'
 import { getPickedLeg } from '~/server/airports.functions'
 
@@ -47,7 +48,7 @@ function SpinPage() {
     )
   }
 
-  const seed = `${origin.id}:${search.min}:${search.max}:${search.speed}:${search.rwy}:${search.paved}:${search.iap}`
+  const seed = `${origin.id}:${search.min}:${search.max}:${search.speed}:${search.rwy}:${search.paved}:${search.iap}:${search.food}`
 
   return (
     <div className="mt-8 grid gap-10 md:grid-cols-[340px_1fr]">
@@ -124,6 +125,10 @@ function Result({
           value={leg.rwy ? `${leg.rwy.toLocaleString()} ft ${leg.paved ? 'hard' : 'turf'}` : 'unknown'}
         />
         <Stat label="Field elev" value={leg.elev == null ? 'unknown' : `${leg.elev.toLocaleString()} ft`} />
+        <Stat
+          label="Food on field"
+          value={leg.food === 0 ? 'none mapped' : leg.food === 1 ? '1 place' : `${leg.food} places`}
+        />
       </dl>
 
       <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3 text-sm">
@@ -203,7 +208,10 @@ function CandidateList({
                 active ? 'bg-ink-700' : 'hover:bg-ink-800'
               }`}
             >
-              <span className={`col-start-1 row-start-1 text-amber ${AUTO_CELL}`}>{leg.id}</span>
+              <span className={`col-start-1 row-start-1 text-amber ${AUTO_CELL}`}>
+                {leg.id}
+                {leg.food > 0 && <FoodMark className="ml-1 inline-block align-[-0.1em] text-text" />}
+              </span>
               <span className={`col-start-2 row-start-1 truncate font-sans text-text ${AUTO_CELL}`}>
                 {leg.name}
               </span>

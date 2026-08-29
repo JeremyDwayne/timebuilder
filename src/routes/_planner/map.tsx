@@ -12,7 +12,14 @@ import {
 } from '~/lib/airspace'
 import { bearingDeg, compassPoint, distanceNm, type LatLon } from '~/lib/geo'
 import { labelBudget } from '~/lib/map-labels'
-import { formatMinutes, type Airport, type MapAirport } from '~/lib/airport'
+import {
+  formatMinutes,
+  formatRestaurantKind,
+  formatSeen,
+  type Airport,
+  type MapAirport,
+} from '~/lib/airport'
+import { FoodMark, foodMarkPath } from '~/components/FoodMark'
 import { tfrStyle, type Tfr, type TfrPart, type TfrReport } from '~/lib/tfr'
 import { getMapLayers, getTfrs } from '~/server/airports.functions'
 
@@ -27,7 +34,7 @@ const FETCH_MARGIN = 1.8
 
 export const Route = createFileRoute('/_planner/map')({
   ssr: 'data-only',
-  loaderDeps: ({ search: { from, min, max, speed, rwy, paved, iap } }) => ({
+  loaderDeps: ({ search: { from, min, max, speed, rwy, paved, iap, food } }) => ({
     from,
     min,
     max,
@@ -35,6 +42,7 @@ export const Route = createFileRoute('/_planner/map')({
     rwy,
     paved,
     iap,
+    food,
     radiusNm: Math.ceil(Math.max(min, max) * speed),
   }),
   loader: ({ deps }) =>
@@ -65,6 +73,12 @@ const MAX_ZOOM = 8
 const ZOOM_STEP = 1.5
 /** Pointer travel past which a press counts as a pan rather than a click. */
 const DRAG_THRESHOLD_PX = 4
+/**
+ * Width of the burger drawn above a field that has somewhere to eat. Fixed
+ * rather than scaled with zoom, the way the dots are, so it stays legible at the
+ * widest plot and never grows into the field beside it.
+ */
+const FOOD_MARK_PX = 9
 
 /** Plot-frame offset in nautical miles, north up, from an azimuthal projection. */
 function project(origin: LatLon, point: LatLon): [number, number] {
@@ -128,7 +142,7 @@ type PlottedAirport = {
 type Hit =
   | { sort: 'airspace'; area: AirspaceArea }
   | { sort: 'tfr'; tfr: Tfr; part: TfrPart }
-  /** A public-use field that the current time band leaves out. */
+  /** Any public-use field, whether the time band takes it in or leaves it out. */
   | { sort: 'airport'; entry: PlottedAirport }
 
 type Popup = { x: number; y: number; hits: Array<Hit> }
@@ -202,8 +216,11 @@ function MapPage() {
     }
   }, [origin, radiusNm, requestTfrs])
 
-  // Changing the plot invalidates anything the popup was pointing at.
-  useEffect(() => setPopup(null), [origin, radiusNm, zoom])
+  // Changing the plot invalidates anything the popup was pointing at. `layers`
+  // covers the destination filters too: without it, toggling one left a popup
+  // holding a stale entry, still offering to pick a field the filter had just
+  // excluded, which set a `?pick=` that resolves to nothing.
+  useEffect(() => setPopup(null), [origin, radiusNm, zoom, layers])
 
   // A new plot starts centred again.
   useEffect(() => setPan({ x: 0, y: 0 }), [origin, radiusNm])
@@ -378,16 +395,36 @@ function MapPage() {
       }))
 
       const isActive = (id: string) => id === picked?.airport.id || id === hover?.airport.id
+      /** Where a burger was drawn, so an identifier is not printed over it. */
+      const foodMarks: Array<{ x: number; y: number }> = []
+
       for (const { entry, x, y } of placed.current) {
         if (offScreen(x, y)) continue
         const active = isActive(entry.airport.id)
+        const radius = active ? 5 : entry.inRange ? 3 : 2
+        const colour = active ? '#f2b134' : entry.inRange ? '#eef3f9' : '#7a8798'
         ctx.beginPath()
-        ctx.arc(x, y, active ? 5 : entry.inRange ? 3 : 2, 0, Math.PI * 2)
-        ctx.fillStyle = active ? '#f2b134' : entry.inRange ? '#eef3f9' : '#7a8798'
+        ctx.arc(x, y, radius, 0, Math.PI * 2)
+        ctx.fillStyle = colour
         ctx.fill()
         ctx.lineWidth = active ? 2 : 1.5
         ctx.strokeStyle = '#0b0f14'
         ctx.stroke()
+
+        // The dot still marks the position; the burger sits above it and takes
+        // the dot's own colour, so range stays a matter of brightness and food
+        // stays a matter of shape.
+        if (entry.airport.fieldFood) {
+          const my = y - radius - 2 - (FOOD_MARK_PX * 0.9) / 2
+          foodMarkPath(ctx, x, my, FOOD_MARK_PX)
+          ctx.lineWidth = 2.5
+          ctx.lineJoin = 'round'
+          ctx.strokeStyle = '#0b0f14'
+          ctx.stroke()
+          ctx.fillStyle = colour
+          ctx.fill()
+          foodMarks.push({ x, y: my })
+        }
       }
 
       ctx.beginPath()
@@ -406,6 +443,9 @@ function MapPage() {
       // this its "D 26/SFC" printed straight over the field it belongs to.
 
       const reserved: Array<{ x: number; y: number; halfWidth: number; halfHeight: number }> = []
+      for (const mark of foodMarks) {
+        reserved.push({ x: mark.x, y: mark.y, halfWidth: FOOD_MARK_PX / 2, halfHeight: FOOD_MARK_PX * 0.45 })
+      }
 
       /** Boxes are centre-anchored, with a little air around each. */
       const fits = (x: number, y: number, halfWidth: number, halfHeight: number) =>
@@ -658,18 +698,12 @@ function MapPage() {
             // A drag moved the map; only a press that stayed put is a click.
             if (!active || active.moved > DRAG_THRESHOLD_PX) return
 
+            // One popup for every kind of click. A field used to set `?pick=`
+            // outright and report itself in a line under the map, which put the
+            // answer a long way from the thing that was clicked and left no room
+            // for what is on the field.
             const { px, py } = canvasPoint(e)
             const entry = nearestAirport(px, py)
-            if (entry?.inRange) {
-              setPopup(null)
-              navigate({
-                search: (prev) => ({ ...prev, pick: entry.airport.id }),
-                replace: true,
-              })
-              return
-            }
-            // Out of range, so name it and offer to widen the band instead of
-            // picking something the wheel could never have drawn.
             const hits = hitsAt(px, py)
             const all: Array<Hit> = entry ? [{ sort: 'airport', entry }, ...hits] : hits
             setPopup(all.length > 0 ? { x: px, y: py, hits: all } : null)
@@ -691,9 +725,13 @@ function MapPage() {
         />
 
         {popup && (
-          <AirspacePopup
+          <MapPopup
             popup={popup}
             onClose={() => setPopup(null)}
+            onPick={(id) => {
+              setPopup(null)
+              navigate({ search: (prev) => ({ ...prev, pick: id }), replace: true })
+            }}
             onWiden={(minutes) => {
               const hours = minutes / 60
               setPopup(null)
@@ -715,7 +753,12 @@ function MapPage() {
         {hover || picked ? (
           <Readout entry={(hover ?? picked)!} origin={origin} />
         ) : (
-          'Bright dots are in range, dim ones are not. Click any of them, or anywhere else to identify the airspace. Drag to move, scroll to zoom.'
+          <>
+            Bright dots are in range, dim ones are not. A{' '}
+            <FoodMark className="inline-block align-[-0.1em] text-text" /> means there is somewhere
+            to eat on the field. Click any of them, or anywhere else to identify the airspace. Drag
+            to move, scroll to zoom.
+          </>
         )}
       </p>
       <AirspaceLegend
@@ -772,23 +815,31 @@ function ZoomControls({
   )
 }
 
-/** Names whatever was clicked, with its vertical limits where they are published. */
-function AirspacePopup({
+/**
+ * Names whatever was clicked: the field, what is on it, and every airspace and
+ * TFR layer underneath, smallest first. This is the only answer the map gives to
+ * a click, which is why the field's own actions live in it rather than under the
+ * plot.
+ */
+function MapPopup({
   popup,
   onClose,
+  onPick,
   onWiden,
 }: {
   popup: Popup
   onClose: () => void
+  /** Takes the field as the destination for this spin. */
+  onPick: (id: string) => void
   /** Stretches the time band far enough to take in a field it currently excludes. */
   onWiden: (minutes: number) => void
 }) {
   return (
     <div
-      className="absolute z-10 w-72 rounded border border-line bg-ink-900/97 p-3 shadow-xl"
+      className="absolute z-10 flex max-h-[min(24rem,88%)] w-72 flex-col overflow-y-auto rounded border border-line bg-ink-900/97 p-3 shadow-xl"
       style={{
         left: `min(${popup.x + 12}px, calc(100% - 19rem))`,
-        top: `min(${popup.y + 12}px, calc(100% - 8rem))`,
+        top: `min(${popup.y + 12}px, calc(100% - 9rem))`,
       }}
     >
       <button
@@ -803,27 +854,7 @@ function AirspacePopup({
         {popup.hits.slice(0, 5).map((hit) =>
           hit.sort === 'airport' ? (
             <li key={`airport-${hit.entry.airport.id}`}>
-              <p className="font-mono text-xs text-muted">
-                {hit.entry.airport.id} · {hit.entry.distanceNm} nm ·{' '}
-                {formatMinutes(hit.entry.minutes)} each way
-              </p>
-              <p className="mt-0.5 text-xs text-text">{hit.entry.airport.name}</p>
-              <p className="mt-1 flex gap-3 font-mono text-xs">
-                <button
-                  type="button"
-                  onClick={() => onWiden(hit.entry.minutes)}
-                  className="text-sky underline underline-offset-4"
-                >
-                  add to the time band
-                </button>
-                <Link
-                  to="/airport/$id"
-                  params={{ id: hit.entry.airport.id }}
-                  className="text-sky underline underline-offset-4"
-                >
-                  field detail
-                </Link>
-              </p>
+              <AirportHit hit={hit.entry} onPick={onPick} onWiden={onWiden} />
             </li>
           ) : hit.sort === 'tfr' ? (
             <li key={`tfr-${hit.tfr.notamId}`}>
@@ -853,6 +884,119 @@ function AirspacePopup({
         </p>
       )}
     </div>
+  )
+}
+
+function AirportHit({
+  hit,
+  onPick,
+  onWiden,
+}: {
+  hit: PlottedAirport
+  onPick: (id: string) => void
+  onWiden: (minutes: number) => void
+}) {
+  const { airport } = hit
+  const runway =
+    airport.rwy === null ? 'runway unknown'
+    : `${airport.rwy.toLocaleString()} ft ${airport.paved ? 'hard' : 'turf'}`
+
+  return (
+    <>
+      <p className={`font-mono text-xs ${hit.inRange ? 'text-amber' : 'text-muted'}`}>
+        {airport.id} · {hit.distanceNm} nm · {formatMinutes(hit.minutes)} each way
+      </p>
+      <p className="mt-0.5 text-xs text-text">{airport.name}</p>
+      <p className="font-mono text-xs text-muted">
+        {String(hit.courseDeg).padStart(3, '0')}° {compassPoint(hit.courseDeg)} · {runway}
+        {airport.iap && ' · approach'}
+      </p>
+      <p className="mt-1 flex gap-3 font-mono text-xs">
+        {hit.inRange ?
+          <button
+            type="button"
+            onClick={() => onPick(airport.id)}
+            className="text-sky underline underline-offset-4"
+          >
+            pick this
+          </button>
+        : <button
+            type="button"
+            onClick={() => onWiden(hit.minutes)}
+            className="text-sky underline underline-offset-4"
+          >
+            add to the time band
+          </button>
+        }
+        <Link
+          to="/airport/$id"
+          params={{ id: airport.id }}
+          className="text-sky underline underline-offset-4"
+        >
+          field detail
+        </Link>
+      </p>
+      <FoodList airport={airport} />
+    </>
+  )
+}
+
+/**
+ * What is on the field, as far as the map needs to say it. Hours and the last
+ * sighting are printed where a source has them, since a cafe that shut is the
+ * whole trip wasted; everything else about a place lives on the field page.
+ *
+ * At a field the airlines serve nothing is named at all. Neither source can say
+ * which side of security a place there is on, which is why such a field is not a
+ * destination, and listing its restaurants would say the opposite of the mark on
+ * the map and the filter in the header.
+ */
+function FoodList({ airport }: { airport: MapAirport }) {
+  const { food, foodCount, terminalFood, airlineField } = airport
+  if (foodCount === 0 && terminalFood === 0) return null
+
+  if (airlineField) {
+    return (
+      <p className="mt-2 font-mono text-[10px] text-muted">
+        The airlines serve this field, so its {foodCount + terminalFood} places to eat are
+        probably past security. Not a destination.
+      </p>
+    )
+  }
+
+  return (
+    <>
+      <p className="mt-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+        <FoodMark className="text-text" /> Food on field
+      </p>
+      <ul className="mt-0.5 space-y-1">
+        {food.map((place) => {
+          // Hours and the last sighting share a line: both are the answer to
+          // "will it be open when I get there", and neither earns its own.
+          const footnote = [place.hours, formatSeen(place.seen)].filter(Boolean).join(' · ')
+          return (
+            <li key={place.name} className="text-xs text-text">
+              {place.name}{' '}
+              <span className="font-mono text-[10px] text-muted">
+                {formatRestaurantKind(place.kind)}
+                {place.chain && ', chain'}
+              </span>
+              {footnote && <span className="block font-mono text-[10px] text-muted">{footnote}</span>}
+            </li>
+          )
+        })}
+        {foodCount > food.length && (
+          <li className="font-mono text-[10px] text-muted">
+            and {foodCount - food.length} more on the field
+          </li>
+        )}
+        {terminalFood > 0 && (
+          <li className="font-mono text-[10px] text-muted">
+            {terminalFood} more inside the terminal, past security
+          </li>
+        )}
+      </ul>
+    </>
   )
 }
 

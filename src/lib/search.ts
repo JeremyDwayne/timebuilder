@@ -30,6 +30,12 @@ export const spinSearch = type({
   paved: type('boolean').default(true),
   /** Only fields with a published instrument approach. */
   iap: type('boolean').default(false),
+  /**
+   * Only fields with somewhere to eat on the field itself. Terminal chains do
+   * not count, since this is a tool for general aviation and you cannot walk to
+   * them from the ramp.
+   */
+  food: type('boolean').default(false),
   /** The airport the wheel landed on. Present only after a spin. */
   'pick?': ident,
 })

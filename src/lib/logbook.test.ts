@@ -21,6 +21,7 @@ const leg = (id: string, minutes: number, distanceNm = minutes * 2): Leg => ({
   distanceNm,
   courseDeg: 90,
   minutes,
+  food: 0,
 })
 
 afterEach(() => {

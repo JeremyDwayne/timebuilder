@@ -14,6 +14,7 @@ const setup: SpinQuery = {
   rwy: 3000,
   paved: true,
   iap: false,
+  food: false,
 }
 
 afterEach(() => window.localStorage.clear())
@@ -38,6 +39,7 @@ describe('readPreferences', () => {
       rwy: 2000,
       paved: true,
       iap: false,
+      food: false,
     })
   })
 

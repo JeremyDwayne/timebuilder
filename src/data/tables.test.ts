@@ -3,9 +3,15 @@ import { describe, expect, it } from 'vitest'
 import { AIRPORTS_TABLE } from '~/data/airports.generated'
 import { AIRSPACE_TABLE } from '~/data/airspace.generated'
 import { FREQUENCIES_TABLE } from '~/data/frequencies.generated'
+import { RESTAURANTS_TABLE } from '~/data/restaurants.generated'
 import { RUNWAYS_TABLE } from '~/data/runways.generated'
 import { STATE_LABELS_TABLE } from '~/data/state-labels.generated'
-import { airportFrequencies, airportRunways, findAirport } from '~/server/airport-db.server'
+import {
+  airportFrequencies,
+  airportRestaurants,
+  airportRunways,
+  findAirport,
+} from '~/server/airport-db.server'
 
 /**
  * The generated tables are pipe-delimited with one row per line and the decoders
@@ -18,6 +24,7 @@ const TABLES = [
   { name: 'airports', table: AIRPORTS_TABLE, fields: 10 },
   { name: 'runways', table: RUNWAYS_TABLE, fields: 7 },
   { name: 'frequencies', table: FREQUENCIES_TABLE, fields: 4 },
+  { name: 'restaurants', table: RESTAURANTS_TABLE, fields: 9 },
   { name: 'airspace', table: AIRSPACE_TABLE, fields: 6 },
   { name: 'state-labels', table: STATE_LABELS_TABLE, fields: 3 },
 ] as const
@@ -87,5 +94,47 @@ describe('runway and frequency decoding', () => {
       expect(frequency.mhz).toBeGreaterThanOrEqual(108)
       expect(frequency.mhz).toBeLessThanOrEqual(137)
     }
+  })
+})
+
+describe('restaurant decoding', () => {
+  it('puts what a pilot can walk to ahead of anything past security', () => {
+    const withTerminal = AIRPORTS_TABLE.split('\n')
+      .map((row) => row.split('|')[0]!)
+      .map((id) => airportRestaurants(id))
+      .find((list) => list.some((r) => r.terminal) && list.some((r) => !r.terminal))
+
+    expect(withTerminal).toBeDefined()
+    const firstTerminal = withTerminal!.findIndex((r) => r.terminal)
+    expect(withTerminal!.slice(firstTerminal).every((r) => r.terminal)).toBe(true)
+  })
+
+  it('gives nothing for a field with no mapped food', () => {
+    expect(airportRestaurants('ZZZZ')).toEqual([])
+  })
+})
+
+describe('restaurant freshness', () => {
+  /**
+   * The date is the only thing standing between a pilot and a lunch stop that
+   * shut years ago, so a row the filter would actually offer should carry one.
+   * The entries that do not are the handful OpenStreetMap has but Overture does
+   * not, where nobody has ever recorded a `check_date`.
+   */
+  it('records when a source last saw the places it offers as destinations', () => {
+    const offered = RESTAURANTS_TABLE.split('\n')
+      .map((row) => row.split('|'))
+      .filter((fields) => (Number(fields[7]) & 11) === 0)
+    const dated = offered.filter((fields) => /^\d{4}-\d{2}$/.test(fields[8] ?? ''))
+    expect(offered.length).toBeGreaterThan(100)
+    expect(dated.length / offered.length).toBeGreaterThan(0.85)
+  })
+
+  /** Nothing older than the cutoff the build applies should have survived it. */
+  it('carries nothing a source has not looked at in years', () => {
+    const stale = RESTAURANTS_TABLE.split('\n')
+      .map((row) => row.split('|')[8] ?? '')
+      .filter((seen) => /^\d{4}-\d{2}$/.test(seen) && Number(seen.slice(0, 4)) < 2020)
+    expect(stale).toEqual([])
   })
 })
